@@ -1,4 +1,4 @@
-# PTP Config API
+# ptpconfigurator
 
 这是一个简单的 API 服务，用于读取和提供 PTP 配置文件的内容。
 
