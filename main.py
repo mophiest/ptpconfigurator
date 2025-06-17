@@ -8,17 +8,22 @@ import pwd
 import grp
 import logging
 import subprocess
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
+import asyncio
+from datetime import datetime
 
 PTP4L_SERVICE_PATH = "/etc/systemd/system/ptp4l.service"
 NETWORK_INFO_PATH = "/etc/linuxptp/interfaces.json"
 PHC2SYS_SERVICE_PATH = "/etc/systemd/system/phc2sys.service"
 
 # 配置日志
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="PTP Config API")
@@ -31,6 +36,44 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 全局状态管理
+class ClockSourceState:
+    def __init__(self):
+        self.current_source: Optional[str] = None
+        self.last_update: Optional[datetime] = None
+        self.is_failed: bool = False
+        self.last_sync_time: Optional[datetime] = None
+        self._lock = asyncio.Lock()
+
+    async def update(self, source: str, is_failed: bool = False):
+        async with self._lock:
+            self.current_source = source
+            self.last_update = datetime.now()
+            self.is_failed = is_failed
+            if not is_failed:
+                self.last_sync_time = datetime.now()
+
+    async def get_state(self) -> Dict:
+        async with self._lock:
+            # 检查是否超时
+            if self.last_sync_time:
+                time_since_last_sync = (datetime.now() - self.last_sync_time).total_seconds()
+                if time_since_last_sync > 3:  # 3秒超时
+                    return {
+                        "current_source": "noClockAvailable",
+                        "last_update": self.last_update.isoformat() if self.last_update else None,
+                        "status": "timeout"
+                    }
+
+            return {
+                "current_source": self.current_source,
+                "last_update": self.last_update.isoformat() if self.last_update else None,
+                "status": "failed" if self.is_failed else "normal"
+            }
+
+# 创建全局状态实例
+clock_source_state = ClockSourceState()
 
 class ConfigUpdate(BaseModel):
     """
@@ -83,6 +126,10 @@ class PHC2SYSParams(BaseModel):
 
 class ServiceAction(BaseModel):
     service_name: str = Field(..., description="要操作的服务名称，如ptp4l.service、phc2sys.service等")
+
+class ClockSourceInfo(BaseModel):
+    current_source: Optional[str] = Field(None, description="当前选择的时钟源")
+    last_update: Optional[str] = Field(None, description="最后更新时间")
 
 def check_file_permissions(file_path):
     """
@@ -783,6 +830,128 @@ async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
     except Exception as e:
         logger.error(f"获取PTP端口状态失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取PTP端口状态失败: {str(e)}")
+
+@app.get("/api/clock-source-state")
+async def get_clock_source_state():
+    """获取时钟源状态"""
+    try:
+        state = await clock_source_state.get_state()
+        return state
+    except Exception as e:
+        logger.error(f"获取时钟源状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取时钟源状态失败")
+
+@app.post("/api/clock-source-state")
+async def update_clock_source_state(source: str):
+    """更新时钟源状态"""
+    try:
+        await clock_source_state.update(source)
+        return {"status": "success", "message": "时钟源状态已更新"}
+    except Exception as e:
+        logger.error(f"更新时钟源状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="更新时钟源状态失败")
+
+async def monitor_phc2sys_logs():
+    """监控phc2sys日志，检测时钟源变化"""
+    logger.info("开始监控phc2sys日志...")
+    while True:
+        try:
+            # 使用journalctl命令获取phc2sys的日志
+            cmd = ["journalctl", "-u", "phc2sys.service", "-f", "-n", "0"]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+
+            while True:
+                line = await process.stdout.readline()
+                if not line:
+                    break
+
+                line_str = line.decode().strip()
+                logger.debug(f"收到日志: {line_str}")
+
+                # 匹配时钟源选择信息
+                match = re.search(r'selecting (\S+) (?:as out-of-domain source clock|for synchronization)', line_str)
+                if match:
+                    source = match.group(1)
+                    # 排除 CLOCK_REALTIME
+                    if source == "CLOCK_REALTIME":
+                        continue
+                    
+                    # 检查是否是异常状态
+                    is_failed = "for synchronization" in line_str
+                    logger.info(f"检测到时钟源{'异常' if is_failed else '变化'}: {source}")
+                    await clock_source_state.update(source, is_failed)
+
+                # 检测同步状态更新
+                elif "CLOCK_REALTIME phc offset" in line_str:
+                    # 重置超时计时器
+                    async with clock_source_state._lock:
+                        clock_source_state.last_sync_time = datetime.now()
+                        if clock_source_state.is_failed:
+                            clock_source_state.is_failed = False
+                            logger.info("时钟源恢复正常")
+
+        except Exception as e:
+            logger.error(f"监控phc2sys日志时发生错误: {str(e)}")
+            await asyncio.sleep(5)  # 发生错误时等待5秒后重试
+
+async def get_last_clock_source_from_logs() -> Optional[tuple[str, bool]]:
+    """
+    从历史日志中获取最近的时钟源信息
+    返回: (时钟源名称, 是否异常)
+    """
+    try:
+        # 获取最近的1000行日志
+        cmd = ["journalctl", "-u", "phc2sys.service", "-n", "1000"]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            logger.error(f"获取历史日志失败: {result.stderr}")
+            return None
+
+        # 按时间倒序处理日志
+        lines = result.stdout.splitlines()
+        for line in reversed(lines):
+            # 匹配时钟源选择信息
+            match = re.search(r'selecting (\S+) (?:as out-of-domain source clock|for synchronization)', line)
+            if match:
+                source = match.group(1)
+                # 排除 CLOCK_REALTIME
+                if source == "CLOCK_REALTIME":
+                    continue
+                # 检查是否是异常状态
+                is_failed = "for synchronization" in line
+                logger.info(f"从历史日志中找到最近的时钟源: {source}, 状态: {'异常' if is_failed else '正常'}")
+                return source, is_failed
+
+        logger.info("历史日志中未找到时钟源信息")
+        return None
+    except Exception as e:
+        logger.error(f"扫描历史日志时发生错误: {str(e)}")
+        return None
+
+@app.on_event("startup")
+async def startup_event():
+    """服务启动时的事件处理"""
+    logger.info("=== 服务启动信息 ===")
+    logger.info("检查必要的文件权限...")
+    
+    # 检查必要的文件权限
+    check_file_permissions(PTP4L_SERVICE_PATH)
+    check_file_permissions(PHC2SYS_SERVICE_PATH)
+    
+    # 从历史日志中获取最近的时钟源信息
+    last_clock_info = await get_last_clock_source_from_logs()
+    if last_clock_info:
+        source, is_failed = last_clock_info
+        await clock_source_state.update(source, is_failed)
+        logger.info(f"已从历史日志中恢复时钟源状态: {source}")
+    
+    # 启动日志监控任务
+    asyncio.create_task(monitor_phc2sys_logs())
 
 if __name__ == "__main__":
     import uvicorn
