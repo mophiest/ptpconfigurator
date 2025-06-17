@@ -41,3 +41,4 @@ python main.py
 
 - 确保运行服务的用户有权限读取 `/etc/linuxptp/ptp4l.conf` 文件
 - 在生产环境中，建议配置具体的 CORS 允许域名，而不是使用 "*" 
+ 

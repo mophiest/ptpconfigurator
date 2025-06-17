@@ -41,6 +41,7 @@ class ConfigUpdate(BaseModel):
 
 class Ptp4lInterfaceUpdate(BaseModel):
     interfaces: List[str] = Field(..., min_items=1, max_items=2, description="要写入的网卡名，1或2个")
+    service_name: str = Field(default="ptp4l.service", description="要修改的service文件名称")
 
 class Phc2sysDomainUpdate(BaseModel):
     domain: int
@@ -48,6 +49,40 @@ class Phc2sysDomainUpdate(BaseModel):
 class PTPStatusRequest(BaseModel):
     domain: int
     uds_path: str
+
+class PHC2SYSConfig(BaseModel):
+    domain: int = Field(..., description="PTP domain值", example=127)
+    uds_address: str = Field(..., description="UDS地址路径", example="/var/run/ptp4l1")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "domain": 127,
+                "uds_address": "/var/run/ptp4l1"
+            }
+        }
+
+class PHC2SYSParams(BaseModel):
+    params: List[PHC2SYSConfig] = Field(..., description="PHC2SYS参数列表，支持多组参数")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "params": [
+                    {
+                        "domain": 127,
+                        "uds_address": "/var/run/ptp4l1"
+                    },
+                    {
+                        "domain": 127,
+                        "uds_address": "/var/run/ptp4l"
+                    }
+                ]
+            }
+        }
+
+class ServiceAction(BaseModel):
+    service_name: str = Field(..., description="要操作的服务名称，如ptp4l.service、phc2sys.service等")
 
 def check_file_permissions(file_path):
     """
@@ -249,25 +284,48 @@ async def update_config(update: ConfigUpdate):
 @app.put("/api/ptp4l-service-interface")
 async def update_ptp4l_service_interface(update: Ptp4lInterfaceUpdate):
     """
-    根据传入网卡名修改ptp4l.service文件中的ExecStart行
+    根据传入网卡名修改指定service文件中的ExecStart行
     """
     try:
-        with open(PTP4L_SERVICE_PATH, 'r') as f:
-            lines = f.readlines()
+        # 构造service文件路径
+        service_path = f"/etc/systemd/system/{update.service_name}"
+        
+        # 检查文件是否存在
+        if not os.path.exists(service_path):
+            logger.error(f"Service文件不存在: {service_path}")
+            raise HTTPException(status_code=404, detail=f"Service文件不存在: {service_path}")
+        
+        logger.info(f"修改service文件: {service_path}, 网卡: {update.interfaces}")
+        
+        try:
+            with open(service_path, 'r') as f:
+                lines = f.readlines()
+        except FileNotFoundError:
+            logger.error(f"Service文件不存在: {service_path}")
+            raise HTTPException(status_code=404, detail=f"Service文件不存在: {service_path}")
+        except PermissionError:
+            logger.error(f"没有权限读取Service文件: {service_path}")
+            raise HTTPException(status_code=403, detail=f"没有权限读取Service文件: {service_path}")
         new_lines = []
         updated = False
         for line in lines:
             if line.strip().startswith("ExecStart="):
-                # 保留原有的 -f ... -s -m 等参数，只替换 -i ...
-                # 匹配 -i xxx 的部分
-                execstart_prefix = line.split('ExecStart=', 1)[0] + 'ExecStart='
+                # 保留原有的命令结构，只替换 -i 参数
+                # 先去掉所有 -i xxx 参数
                 rest = line.split('ExecStart=', 1)[1]
+                # 确保ptp4l在开头
+                if not rest.strip().startswith('ptp4l'):
+                    rest = 'ptp4l ' + rest.lstrip()
                 # 去掉所有 -i xxx
                 rest = re.sub(r'-i\s+\S+\s*', '', rest)
+                # 在ptp4l后面添加新的 -i 参数
+                parts = rest.split(maxsplit=1)
+                cmd = parts[0]  # 应该是 'ptp4l'
+                remaining = parts[1] if len(parts) > 1 else ''
                 # 构造新的 -i 参数
-                i_args = ''.join([f'-i {iface} ' for iface in update.interfaces])
-                # 合成新行
-                new_line = execstart_prefix + f"/usr/sbin/ptp4l {i_args}" + rest.lstrip()
+                i_args = ' '.join([f'-i {iface}' for iface in update.interfaces])
+                # 合成新行，确保顺序是: ptp4l -i xxx [其他参数]
+                new_line = f"ExecStart={cmd} {i_args} {remaining}"
                 new_lines.append(new_line)
                 updated = True
             else:
@@ -275,12 +333,15 @@ async def update_ptp4l_service_interface(update: Ptp4lInterfaceUpdate):
         if not updated:
             logger.error("未找到 ExecStart 行")
             raise HTTPException(status_code=400, detail="未找到 ExecStart 行")
-        with open(PTP4L_SERVICE_PATH, 'w') as f:
+        with open(service_path, 'w') as f:
             f.writelines(new_lines)
-        return {"status": "success", "message": "ExecStart已更新", "interfaces": update.interfaces}
+        return {"status": "success", "message": "ExecStart已更新", "interfaces": update.interfaces, "service_name": update.service_name}
+    except HTTPException:
+        # 重新抛出HTTPException，不进行包装
+        raise
     except Exception as e:
-        logger.error(f"修改ptp4l.service失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="修改ptp4l.service失败")
+        logger.error(f"修改{update.service_name}失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"修改{update.service_name}失败")
 
 def get_network_interfaces_info():
     interfaces = []
@@ -329,33 +390,62 @@ async def save_network_interfaces():
         logger.error(f"保存网络接口信息失败: {str(e)}")
         raise HTTPException(status_code=500, detail="保存网络接口信息失败")
 
-@app.put("/api/phc2sys-domain")
-async def update_phc2sys_domain(update: Phc2sysDomainUpdate):
+@app.put("/api/phc2sys/config")
+async def update_phc2sys_config(config: PHC2SYSParams):
     """
-    修改phc2sys.service文件中ExecStart行的-n参数
+    更新phc2sys.service配置
+    
+    - 支持动态替换ExecStart行中的UDS地址(-z)和PTP domain(-n)参数
+    - 支持配置多组参数，每组参数包含domain和uds_address
+    - 基础参数(-r -m -a)会自动保留在最后
+    
+    示例：
+    ```json
+    {
+        "params": [
+            {
+                "domain": 127,
+                "uds_address": "/var/run/ptp4l1"
+            },
+            {
+                "domain": 127,
+                "uds_address": "/var/run/ptp4l"
+            }
+        ]
+    }
+    ```
     """
     try:
-        with open(PHC2SYS_SERVICE_PATH, 'r') as f:
-            lines = f.readlines()
-        new_lines = []
-        updated = False
-        for line in lines:
-            if line.strip().startswith("ExecStart="):
-                # 替换 -n 后面的数字
-                new_line = re.sub(r'(-n\s+)\d+', r'\g<1>{}'.format(update.domain), line)
-                new_lines.append(new_line)
-                updated = True
-            else:
-                new_lines.append(line)
-        if not updated:
-            logger.error("未找到 ExecStart 行")
-            raise HTTPException(status_code=400, detail="未找到 ExecStart 行")
-        with open(PHC2SYS_SERVICE_PATH, 'w') as f:
-            f.writelines(new_lines)
-        return {"status": "success", "message": "ExecStart已更新", "domain": update.domain}
+        # 读取当前配置
+        with open("/etc/systemd/system/phc2sys.service", "r") as f:
+            content = f.read()
+
+        # 构建新的ExecStart行
+        base_params = "-r -m -a"  # 基础参数
+        param_sets = []
+        for param in config.params:
+            param_sets.append(f"-z {param.uds_address} -n {param.domain}")
+        
+        new_exec_start = f"ExecStart=phc2sys {' '.join(param_sets)} {base_params}"
+
+        # 替换ExecStart行
+        new_content = re.sub(
+            r"ExecStart=phc2sys.*",
+            new_exec_start,
+            content
+        )
+
+        # 写入新配置
+        with open("/etc/systemd/system/phc2sys.service", "w") as f:
+            f.write(new_content)
+
+        # 重新加载systemd配置
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
+
+        return {"message": "phc2sys.service配置已更新"}
     except Exception as e:
-        logger.error(f"修改phc2sys.service失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="修改phc2sys.service失败")
+        logger.error(f"更新phc2sys.service配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/systemd/reload")
 async def systemd_reload():
@@ -377,25 +467,80 @@ async def systemd_enable_ptp4l():
         logger.error(f"enable ptp4l 失败: {str(e)}")
         raise HTTPException(status_code=500, detail="enable ptp4l 失败")
 
-@app.post("/api/systemd/start-ptp4l")
-async def systemd_start_ptp4l():
-    """启动 ptp4l.service"""
+@app.post("/api/systemd/start-service")
+async def systemd_start_service(action: ServiceAction):
+    """启动指定的systemd服务"""
     try:
-        subprocess.run(["sudo", "systemctl", "start", "ptp4l.service"], check=True)
-        return {"status": "success", "message": "ptp4l.service 已启动"}
+        logger.info(f"启动服务: {action.service_name}")
+        
+        # 验证服务名称格式
+        if not action.service_name.endswith('.service'):
+            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
+        
+        # 执行启动命令
+        subprocess.run(["sudo", "systemctl", "start", action.service_name], check=True)
+        
+        logger.info(f"服务 {action.service_name} 启动成功")
+        return {"status": "success", "message": f"{action.service_name} 已启动", "service_name": action.service_name}
+    except HTTPException:
+        # 重新抛出HTTPException，不进行包装
+        raise
+    except subprocess.CalledProcessError as e:
+        logger.error(f"启动服务 {action.service_name} 失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"启动服务 {action.service_name} 失败: {str(e)}")
     except Exception as e:
-        logger.error(f"start ptp4l 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="start ptp4l 失败")
+        logger.error(f"启动服务 {action.service_name} 时发生错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"启动服务 {action.service_name} 失败")
 
-@app.post("/api/systemd/start-phc2sys")
-async def systemd_start_phc2sys():
-    """启动 phc2sys.service"""
+@app.post("/api/systemd/stop-service")
+async def systemd_stop_service(action: ServiceAction):
+    """停止指定的systemd服务"""
     try:
-        subprocess.run(["sudo", "systemctl", "start", "phc2sys.service"], check=True)
-        return {"status": "success", "message": "phc2sys.service 已启动"}
+        logger.info(f"停止服务: {action.service_name}")
+        
+        # 验证服务名称格式
+        if not action.service_name.endswith('.service'):
+            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
+        
+        # 执行停止命令
+        subprocess.run(["sudo", "systemctl", "stop", action.service_name], check=True)
+        
+        logger.info(f"服务 {action.service_name} 停止成功")
+        return {"status": "success", "message": f"{action.service_name} 已停止", "service_name": action.service_name}
+    except HTTPException:
+        # 重新抛出HTTPException，不进行包装
+        raise
+    except subprocess.CalledProcessError as e:
+        logger.error(f"停止服务 {action.service_name} 失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"停止服务 {action.service_name} 失败: {str(e)}")
     except Exception as e:
-        logger.error(f"start phc2sys 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="start phc2sys 失败")
+        logger.error(f"停止服务 {action.service_name} 时发生错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"停止服务 {action.service_name} 失败")
+
+@app.post("/api/systemd/restart-service")
+async def systemd_restart_service(action: ServiceAction):
+    """重启指定的systemd服务"""
+    try:
+        logger.info(f"重启服务: {action.service_name}")
+        
+        # 验证服务名称格式
+        if not action.service_name.endswith('.service'):
+            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
+        
+        # 执行重启命令
+        subprocess.run(["sudo", "systemctl", "restart", action.service_name], check=True)
+        
+        logger.info(f"服务 {action.service_name} 重启成功")
+        return {"status": "success", "message": f"{action.service_name} 已重启", "service_name": action.service_name}
+    except HTTPException:
+        # 重新抛出HTTPException，不进行包装
+        raise
+    except subprocess.CalledProcessError as e:
+        logger.error(f"重启服务 {action.service_name} 失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"重启服务 {action.service_name} 失败: {str(e)}")
+    except Exception as e:
+        logger.error(f"重启服务 {action.service_name} 时发生错误: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"重启服务 {action.service_name} 失败")
 
 @app.get("/api/systemd/logs/{service}")
 async def systemd_logs(service: str, lines: int = 100):
@@ -470,6 +615,174 @@ def get_ptp_status(request: PTPStatusRequest):
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/ptp-lock-status")
+async def get_ptp_lock_status(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+    """
+    获取PTP锁定状态
+    通过运行 pmc -u -b 0 'GET TIME_STATUS_NP' -d {domain} -s {uds_path} 命令
+    """
+    try:
+        logger.info(f"获取PTP锁定状态，domain: {domain}, uds_path: {uds_path}")
+        
+        # 构造pmc命令
+        cmd = [
+            "pmc",
+            "-u",
+            "-b", "0",
+            "GET TIME_STATUS_NP",
+            "-d", str(domain),
+            "-s", uds_path
+        ]
+        
+        logger.debug(f"执行命令: {' '.join(cmd)}")
+        
+        # 执行命令
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode != 0:
+            logger.error(f"pmc命令执行失败: {result.stderr}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"pmc命令执行失败: {result.stderr}"
+            )
+        
+        # 解析输出
+        output = result.stdout
+        logger.debug(f"pmc命令输出: {output}")
+        
+        # 提取锁定状态相关信息
+        lock_status = {
+            "domain": domain,
+            "uds_path": uds_path,
+            "raw_output": output,
+            "parsed_data": {}
+        }
+        
+        # 解析各种状态信息
+        patterns = {
+            "gmPresent": r'gmPresent\s+(\w+)',
+            "gmIdentity": r'gmIdentity\s+([0-9a-f.]+)',
+            "offsetFromMaster": r'offsetFromMaster\s+([0-9-]+)',
+            "meanPathDelay": r'meanPathDelay\s+([0-9]+)',
+            "stepsRemoved": r'stepsRemoved\s+([0-9]+)',
+            "clockIdentity": r'clockIdentity\s+([0-9a-f.]+)',
+            "slaveOnly": r'slaveOnly\s+(\w+)',
+            "synchronized": r'synchronized\s+(\w+)',
+            "portState": r'portState\s+(\w+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, output)
+            if match:
+                lock_status["parsed_data"][key] = match.group(1)
+        
+        # 判断锁定状态
+        gm_present = lock_status["parsed_data"].get("gmPresent", "UNKNOWN")
+        gm_identity = lock_status["parsed_data"].get("gmIdentity", "")
+        
+        # 简化判断逻辑：只要gmPresent为真就判断为已同步
+        if gm_present.lower() in ["true", "yes", "1"]:
+            is_locked = True
+            lock_reason = "已同步（检测到主时钟）"
+        else:
+            is_locked = False
+            lock_reason = "未同步（未检测到主时钟）"
+        
+        lock_status["is_locked"] = is_locked
+        lock_status["lock_reason"] = lock_reason
+        lock_status["gm_identity"] = gm_identity
+        
+        logger.info(f"PTP锁定状态: {is_locked}, 原因: {lock_reason}")
+        
+        return lock_status
+        
+    except subprocess.TimeoutExpired:
+        logger.error("pmc命令执行超时")
+        raise HTTPException(status_code=500, detail="pmc命令执行超时")
+    except FileNotFoundError:
+        logger.error("pmc命令未找到")
+        raise HTTPException(status_code=500, detail="pmc命令未找到，请确保已安装linuxptp工具包")
+    except Exception as e:
+        logger.error(f"获取PTP锁定状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取PTP锁定状态失败: {str(e)}")
+
+@app.get("/api/ptp-port-status")
+async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+    """
+    获取PTP端口状态
+    通过运行 pmc -u -b 0 'GET PORT_DATA_SET' -d {domain} -s {uds_path} 命令
+    """
+    try:
+        logger.info(f"获取PTP端口状态，domain: {domain}, uds_path: {uds_path}")
+        
+        # 构造pmc命令
+        cmd = [
+            "pmc",
+            "-u",
+            "-b", "0",
+            "GET PORT_DATA_SET",
+            "-d", str(domain),
+            "-s", uds_path
+        ]
+        
+        logger.debug(f"执行命令: {' '.join(cmd)}")
+        
+        # 执行命令
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode != 0:
+            logger.error(f"pmc命令执行失败: {result.stderr}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"pmc命令执行失败: {result.stderr}"
+            )
+        
+        # 解析输出
+        output = result.stdout
+        logger.debug(f"pmc命令输出: {output}")
+        
+        # 提取端口状态信息
+        port_status = {
+            "domain": domain,
+            "uds_path": uds_path,
+            "raw_output": output,
+            "port_data": {}
+        }
+        
+        # 解析portIdentity和portState
+        patterns = {
+            "portIdentity": r'portIdentity\s+([0-9a-f.]+)',
+            "portState": r'portState\s+(\w+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, output)
+            if match:
+                port_status["port_data"][key] = match.group(1)
+        
+        # 检查是否成功解析到必要信息
+        port_identity = port_status["port_data"].get("portIdentity", "")
+        port_state = port_status["port_data"].get("portState", "")
+        
+        if not port_identity or not port_state:
+            logger.warning("未能解析到完整的端口信息")
+            port_status["port_data"]["portIdentity"] = port_identity
+            port_status["port_data"]["portState"] = port_state
+        
+        logger.info(f"PTP端口状态: portIdentity={port_identity}, portState={port_state}")
+        
+        return port_status
+        
+    except subprocess.TimeoutExpired:
+        logger.error("pmc命令执行超时")
+        raise HTTPException(status_code=500, detail="pmc命令执行超时")
+    except FileNotFoundError:
+        logger.error("pmc命令未找到")
+        raise HTTPException(status_code=500, detail="pmc命令未找到，请确保已安装linuxptp工具包")
+    except Exception as e:
+        logger.error(f"获取PTP端口状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取PTP端口状态失败: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
