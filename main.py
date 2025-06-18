@@ -75,6 +75,37 @@ class ClockSourceState:
 # 创建全局状态实例
 clock_source_state = ClockSourceState()
 
+def check_phc2sys_service_status() -> bool:
+    """
+    检查phc2sys服务是否正在运行
+    
+    Returns:
+        bool: True表示服务正在运行，False表示服务未运行
+    """
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", "phc2sys.service"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return result.returncode == 0 and result.stdout.strip() == "active"
+    except Exception as e:
+        logger.error(f"检查phc2sys服务状态时出错: {str(e)}")
+        return False
+
+def get_current_clock_sync_mode() -> str:
+    """
+    获取当前主机锁相方式
+    
+    Returns:
+        str: 当前锁相方式 ("internal", "BB", "PTP")
+    """
+    if check_phc2sys_service_status():
+        return "PTP"
+    else:
+        return "internal"
+
 class ConfigUpdate(BaseModel):
     """
     配置更新请求模型
@@ -98,7 +129,7 @@ class PHC2SYSConfig(BaseModel):
     uds_address: str = Field(..., description="UDS地址路径", example="/var/run/ptp4l1")
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "domain": 127,
                 "uds_address": "/var/run/ptp4l1"
@@ -109,7 +140,7 @@ class PHC2SYSParams(BaseModel):
     params: List[PHC2SYSConfig] = Field(..., description="PHC2SYS参数列表，支持多组参数")
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "params": [
                     {
@@ -130,6 +161,19 @@ class ServiceAction(BaseModel):
 class ClockSourceInfo(BaseModel):
     current_source: Optional[str] = Field(None, description="当前选择的时钟源")
     last_update: Optional[str] = Field(None, description="最后更新时间")
+
+class ClockSyncMode(BaseModel):
+    """
+    主机锁相方式请求模型
+    """
+    mode: str = Field(..., description="锁相方式", example="PTP", pattern="^(internal|BB|PTP)$")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "mode": "PTP"
+            }
+        }
 
 def check_file_permissions(file_path):
     """
@@ -252,11 +296,16 @@ def update_config_file(config_path: str, key: str, value: str) -> bool:
         return False
 
 @app.get("/api/ptp-config")
-async def get_ptp_config():
+async def get_ptp_config(config_path: Optional[str] = None):
     """
     读取 PTP 配置文件内容并解析为键值对
+    
+    Args:
+        config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
     """
-    config_path = "/etc/linuxptp/ptp4l.conf"
+    # 如果没有传入config_path，使用默认路径
+    if config_path is None:
+        config_path = "/etc/linuxptp/ptp4l.conf"
     
     try:
         logger.info(f"开始处理请求，配置文件路径: {config_path}")
@@ -300,15 +349,22 @@ async def get_ptp_config():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/ptp-config")
-async def update_config(update: ConfigUpdate):
+async def update_config(update: ConfigUpdate, config_path: Optional[str] = None):
     """
     更新配置文件中的指定键值对（只用body里的key）
+    
+    Args:
+        update: 包含要更新的键值对
+        config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
     """
-    config_path = "/etc/linuxptp/ptp4l.conf"
+    # 如果没有传入config_path，使用默认路径
+    if config_path is None:
+        config_path = "/etc/linuxptp/ptp4l.conf"
+        
     key = update.key
     value = update.value
     try:
-        logger.info(f"开始更新配置，键: {key}, 值: {value}")
+        logger.info(f"开始更新配置，配置文件: {config_path}, 键: {key}, 值: {value}")
         if not os.path.exists(config_path):
             logger.error(f"配置文件不存在: {config_path}")
             raise HTTPException(status_code=404, detail="PTP configuration file not found")
@@ -317,7 +373,7 @@ async def update_config(update: ConfigUpdate):
             raise HTTPException(status_code=403, detail="没有权限修改配置文件")
         if update_config_file(config_path, key, value):
             logger.info("配置更新成功")
-            return {"status": "success", "message": "配置已更新"}
+            return {"status": "success", "message": "配置已更新", "config_path": config_path}
         else:
             logger.error("配置更新失败")
             raise HTTPException(status_code=400, detail="更新配置失败")
@@ -663,14 +719,14 @@ def get_ptp_status(request: PTPStatusRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/ptp-lock-status")
-async def get_ptp_lock_status(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+@app.get("/api/ptp-timestatus")
+async def get_ptp_timestatus(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
     """
-    获取PTP锁定状态
+    获取PTP时间状态信息
     通过运行 pmc -u -b 0 'GET TIME_STATUS_NP' -d {domain} -s {uds_path} 命令
     """
     try:
-        logger.info(f"获取PTP锁定状态，domain: {domain}, uds_path: {uds_path}")
+        logger.info(f"获取PTP时间状态，domain: {domain}, uds_path: {uds_path}")
         
         # 构造pmc命令
         cmd = [
@@ -698,51 +754,47 @@ async def get_ptp_lock_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
         output = result.stdout
         logger.debug(f"pmc命令输出: {output}")
         
-        # 提取锁定状态相关信息
-        lock_status = {
-            "domain": domain,
-            "uds_path": uds_path,
-            "raw_output": output,
-            "parsed_data": {}
+        # 初始化返回结果
+        time_status = {
+            "master_offset": None,
+            "ingress_time": None,
+            "cumulativeScaledRateOffset": None,
+            "scaledLastGmPhaseChange": None,
+            "gmTimeBaseIndicator": None,
+            "lastGmPhaseChange": None,
+            "gmPresent": None,
+            "gmIdentity": None
         }
         
         # 解析各种状态信息
         patterns = {
+            "master_offset": r'master_offset\s+([0-9-]+)',
+            "ingress_time": r'ingress_time\s+([0-9]+)',
+            "cumulativeScaledRateOffset": r'cumulativeScaledRateOffset\s+([0-9-]+)',
+            "scaledLastGmPhaseChange": r'scaledLastGmPhaseChange\s+([0-9-]+)',
+            "gmTimeBaseIndicator": r'gmTimeBaseIndicator\s+([0-9]+)',
+            "lastGmPhaseChange": r'lastGmPhaseChange\s+([0-9-]+)',
             "gmPresent": r'gmPresent\s+(\w+)',
-            "gmIdentity": r'gmIdentity\s+([0-9a-f.]+)',
-            "offsetFromMaster": r'offsetFromMaster\s+([0-9-]+)',
-            "meanPathDelay": r'meanPathDelay\s+([0-9]+)',
-            "stepsRemoved": r'stepsRemoved\s+([0-9]+)',
-            "clockIdentity": r'clockIdentity\s+([0-9a-f.]+)',
-            "slaveOnly": r'slaveOnly\s+(\w+)',
-            "synchronized": r'synchronized\s+(\w+)',
-            "portState": r'portState\s+(\w+)'
+            "gmIdentity": r'gmIdentity\s+([0-9a-f.]+)'
         }
         
         for key, pattern in patterns.items():
             match = re.search(pattern, output)
             if match:
-                lock_status["parsed_data"][key] = match.group(1)
+                value = match.group(1)
+                # 对于数值类型，尝试转换为整数
+                if key in ["master_offset", "ingress_time", "cumulativeScaledRateOffset", 
+                          "scaledLastGmPhaseChange", "gmTimeBaseIndicator", "lastGmPhaseChange"]:
+                    try:
+                        time_status[key] = int(value)
+                    except ValueError:
+                        time_status[key] = value
+                else:
+                    time_status[key] = value
         
-        # 判断锁定状态
-        gm_present = lock_status["parsed_data"].get("gmPresent", "UNKNOWN")
-        gm_identity = lock_status["parsed_data"].get("gmIdentity", "")
+        logger.info(f"PTP时间状态解析完成")
         
-        # 简化判断逻辑：只要gmPresent为真就判断为已同步
-        if gm_present.lower() in ["true", "yes", "1"]:
-            is_locked = True
-            lock_reason = "已同步（检测到主时钟）"
-        else:
-            is_locked = False
-            lock_reason = "未同步（未检测到主时钟）"
-        
-        lock_status["is_locked"] = is_locked
-        lock_status["lock_reason"] = lock_reason
-        lock_status["gm_identity"] = gm_identity
-        
-        logger.info(f"PTP锁定状态: {is_locked}, 原因: {lock_reason}")
-        
-        return lock_status
+        return time_status
         
     except subprocess.TimeoutExpired:
         logger.error("pmc命令执行超时")
@@ -751,13 +803,13 @@ async def get_ptp_lock_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
         logger.error("pmc命令未找到")
         raise HTTPException(status_code=500, detail="pmc命令未找到，请确保已安装linuxptp工具包")
     except Exception as e:
-        logger.error(f"获取PTP锁定状态失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"获取PTP锁定状态失败: {str(e)}")
+        logger.error(f"获取PTP时间状态失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取PTP时间状态失败: {str(e)}")
 
 @app.get("/api/ptp-port-status")
 async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
     """
-    获取PTP端口状态
+    获取PTP端口状态信息
     通过运行 pmc -u -b 0 'GET PORT_DATA_SET' -d {domain} -s {uds_path} 命令
     """
     try:
@@ -789,35 +841,49 @@ async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
         output = result.stdout
         logger.debug(f"pmc命令输出: {output}")
         
-        # 提取端口状态信息
+        # 初始化返回结果
         port_status = {
-            "domain": domain,
-            "uds_path": uds_path,
-            "raw_output": output,
-            "port_data": {}
+            "portIdentity": None,
+            "portState": None,
+            "logMinDelayReqInterval": None,
+            "peerMeanPathDelay": None,
+            "logAnnounceInterval": None,
+            "announceReceiptTimeout": None,
+            "logSyncInterval": None,
+            "delayMechanism": None,
+            "logMinPdelayReqInterval": None,
+            "versionNumber": None
         }
         
-        # 解析portIdentity和portState
+        # 解析各种端口状态信息
         patterns = {
             "portIdentity": r'portIdentity\s+([0-9a-f.]+)',
-            "portState": r'portState\s+(\w+)'
+            "portState": r'portState\s+(\w+)',
+            "logMinDelayReqInterval": r'logMinDelayReqInterval\s+([0-9-]+)',
+            "peerMeanPathDelay": r'peerMeanPathDelay\s+([0-9]+)',
+            "logAnnounceInterval": r'logAnnounceInterval\s+([0-9-]+)',
+            "announceReceiptTimeout": r'announceReceiptTimeout\s+([0-9]+)',
+            "logSyncInterval": r'logSyncInterval\s+([0-9-]+)',
+            "delayMechanism": r'delayMechanism\s+(\w+)',
+            "logMinPdelayReqInterval": r'logMinPdelayReqInterval\s+([0-9-]+)',
+            "versionNumber": r'versionNumber\s+([0-9]+)'
         }
         
         for key, pattern in patterns.items():
             match = re.search(pattern, output)
             if match:
-                port_status["port_data"][key] = match.group(1)
+                value = match.group(1)
+                # 对于数值类型，尝试转换为整数
+                if key in ["logMinDelayReqInterval", "peerMeanPathDelay", "logAnnounceInterval", 
+                          "announceReceiptTimeout", "logSyncInterval", "logMinPdelayReqInterval", "versionNumber"]:
+                    try:
+                        port_status[key] = int(value)
+                    except ValueError:
+                        port_status[key] = value
+                else:
+                    port_status[key] = value
         
-        # 检查是否成功解析到必要信息
-        port_identity = port_status["port_data"].get("portIdentity", "")
-        port_state = port_status["port_data"].get("portState", "")
-        
-        if not port_identity or not port_state:
-            logger.warning("未能解析到完整的端口信息")
-            port_status["port_data"]["portIdentity"] = port_identity
-            port_status["port_data"]["portState"] = port_state
-        
-        logger.info(f"PTP端口状态: portIdentity={port_identity}, portState={port_state}")
+        logger.info(f"PTP端口状态解析完成")
         
         return port_status
         
@@ -830,6 +896,79 @@ async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
     except Exception as e:
         logger.error(f"获取PTP端口状态失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取PTP端口状态失败: {str(e)}")
+
+@app.get("/api/ptp-currenttimedata")
+async def get_ptp_currenttimedata(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+    """
+    获取PTP当前时间数据信息
+    通过运行 pmc -u -b 0 'GET CURRENT_DATA_SET' -d {domain} -s {uds_path} 命令
+    """
+    try:
+        logger.info(f"获取PTP当前时间数据，domain: {domain}, uds_path: {uds_path}")
+        
+        # 构造pmc命令
+        cmd = [
+            "pmc",
+            "-u",
+            "-b", "0",
+            "GET CURRENT_DATA_SET",
+            "-d", str(domain),
+            "-s", uds_path
+        ]
+        
+        logger.debug(f"执行命令: {' '.join(cmd)}")
+        
+        # 执行命令
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        
+        if result.returncode != 0:
+            logger.error(f"pmc命令执行失败: {result.stderr}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"pmc命令执行失败: {result.stderr}"
+            )
+        
+        # 解析输出
+        output = result.stdout
+        logger.debug(f"pmc命令输出: {output}")
+        
+        # 初始化返回结果
+        current_data = {
+            "stepsRemoved": None,
+            "offsetFromMaster": None,
+            "meanPathDelay": None
+        }
+        
+        # 解析各种当前数据信息
+        patterns = {
+            "stepsRemoved": r'stepsRemoved\s+([0-9]+)',
+            "offsetFromMaster": r'offsetFromMaster\s+([0-9-]+)',
+            "meanPathDelay": r'meanPathDelay\s+([0-9]+)'
+        }
+        
+        for key, pattern in patterns.items():
+            match = re.search(pattern, output)
+            if match:
+                value = match.group(1)
+                # 对于数值类型，尝试转换为整数
+                try:
+                    current_data[key] = int(value)
+                except ValueError:
+                    current_data[key] = value
+        
+        logger.info(f"PTP当前时间数据解析完成")
+        
+        return current_data
+        
+    except subprocess.TimeoutExpired:
+        logger.error("pmc命令执行超时")
+        raise HTTPException(status_code=500, detail="pmc命令执行超时")
+    except FileNotFoundError:
+        logger.error("pmc命令未找到")
+        raise HTTPException(status_code=500, detail="pmc命令未找到，请确保已安装linuxptp工具包")
+    except Exception as e:
+        logger.error(f"获取PTP当前时间数据失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取PTP当前时间数据失败: {str(e)}")
 
 @app.get("/api/clock-source-state")
 async def get_clock_source_state():
@@ -850,6 +989,126 @@ async def update_clock_source_state(source: str):
     except Exception as e:
         logger.error(f"更新时钟源状态失败: {str(e)}")
         raise HTTPException(status_code=500, detail="更新时钟源状态失败")
+
+@app.get("/api/clock-sync-mode")
+async def get_clock_sync_mode():
+    """
+    获取当前主机锁相方式
+    
+    Returns:
+        str: 当前锁相方式 ("internal", "BB", "PTP")
+        - 如果phc2sys服务正在运行，返回"PTP"
+        - 否则返回"internal"
+    """
+    try:
+        current_mode = get_current_clock_sync_mode()
+        phc2sys_running = check_phc2sys_service_status()
+        result = {
+            "mode": current_mode,
+            "phc2sys_running": phc2sys_running
+        }
+        if current_mode == "PTP":
+            last_clock_info = await get_last_clock_source_from_logs()
+            if last_clock_info:
+                result["current_clock_source"] = last_clock_info[0]
+            else:
+                result["current_clock_source"] = None
+        return result
+    except Exception as e:
+        logger.error(f"获取锁相方式失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取锁相方式失败")
+
+@app.put("/api/clock-sync-mode")
+async def update_clock_sync_mode(sync_mode: ClockSyncMode):
+    """
+    设置主机锁相方式
+    
+    Args:
+        sync_mode: 包含要设置的锁相方式 ("internal", "BB", "PTP")
+    
+    Returns:
+        dict: 操作结果和当前锁相方式
+    """
+    try:
+        mode = sync_mode.mode
+        logger.info(f"设置锁相方式: {mode}")
+        
+        # 检查当前phc2sys服务状态
+        phc2sys_running = check_phc2sys_service_status()
+        logger.info(f"当前phc2sys服务状态: {'运行中' if phc2sys_running else '未运行'}")
+        
+        # 根据传入的锁相方式进行操作
+        if mode in ["internal", "BB"]:
+            # 如果phc2sys服务正在运行，需要停止它
+            if phc2sys_running:
+                logger.info("停止phc2sys服务...")
+                result = subprocess.run(
+                    ["systemctl", "stop", "phc2sys.service"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode != 0:
+                    logger.error(f"停止phc2sys服务失败: {result.stderr}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"停止phc2sys服务失败: {result.stderr}"
+                    )
+                
+                logger.info("phc2sys服务已停止")
+            else:
+                logger.info("phc2sys服务未运行，无需操作")
+        
+        elif mode == "PTP":
+            # 对于PTP模式，需要确保phc2sys服务运行
+            if not phc2sys_running:
+                logger.info("启动phc2sys服务...")
+                result = subprocess.run(
+                    ["systemctl", "start", "phc2sys.service"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if result.returncode != 0:
+                    logger.error(f"启动phc2sys服务失败: {result.stderr}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"启动phc2sys服务失败: {result.stderr}"
+                    )
+                
+                logger.info("phc2sys服务已启动")
+            else:
+                logger.info("phc2sys服务已在运行")
+        
+        # 获取操作后的当前状态
+        current_mode = get_current_clock_sync_mode()
+        current_phc2sys_running = check_phc2sys_service_status()
+        
+        logger.info(f"锁相方式设置完成，当前模式: {current_mode}")
+        
+        result = {
+            "status": "success",
+            "message": f"锁相方式已设置为: {mode}",
+            "requested_mode": mode,
+            "current_mode": current_mode,
+            "phc2sys_running": current_phc2sys_running
+        }
+        if current_mode == "PTP":
+            last_clock_info = await get_last_clock_source_from_logs()
+            if last_clock_info:
+                result["current_clock_source"] = last_clock_info[0]
+            else:
+                result["current_clock_source"] = None
+        return result
+        
+    except HTTPException:
+        # 重新抛出HTTPException，不进行包装
+        raise
+    except Exception as e:
+        logger.error(f"设置锁相方式失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"设置锁相方式失败: {str(e)}")
 
 async def monitor_phc2sys_logs():
     """监控phc2sys日志，检测时钟源变化"""

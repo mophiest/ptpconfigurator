@@ -36,7 +36,16 @@ PTP Configurator API 是一个用于管理 PTP (Precision Time Protocol) 配置�
 #### 1.1 获取 PTP 配置
 **GET** `/api/ptp-config`
 
-获取 `/etc/linuxptp/ptp4l.conf` 文件内容，解析为键值对格式。
+获取 PTP 配置文件内容，解析为键值对格式。
+
+**查询参数**:
+- `config_path` (可选): 指定配置文件路径，默认为 `/etc/linuxptp/ptp4l.conf`
+
+**请求示例**:
+```
+GET /api/ptp-config
+GET /api/ptp-config?config_path=/etc/linuxptp/custom.conf
+```
 
 **响应示例**:
 ```json
@@ -119,6 +128,9 @@ PTP Configurator API 是一个用于管理 PTP (Precision Time Protocol) 配置�
 
 修改 PTP 配置文件中的指定键值对。
 
+**查询参数**:
+- `config_path` (可选): 指定配置文件路径，默认为 `/etc/linuxptp/ptp4l.conf`
+
 **请求体**:
 ```json
 {
@@ -127,11 +139,18 @@ PTP Configurator API 是一个用于管理 PTP (Precision Time Protocol) 配置�
 }
 ```
 
+**请求示例**:
+```
+PUT /api/ptp-config
+PUT /api/ptp-config?config_path=/etc/linuxptp/custom.conf
+```
+
 **响应示例**:
 ```json
 {
     "status": "success",
-    "message": "配置已更新"
+    "message": "配置已更新",
+    "config_path": "/etc/linuxptp/ptp4l.conf"
 }
 ```
 
@@ -319,28 +338,176 @@ GET /api/systemd/status/ptp4l.service
 }
 ```
 
-### 6. PTP 状态监控
+### 6. 主机锁相方式管理
 
-#### 6.1 获取 PTP 锁定状态
-**POST** `/api/ptp/status`
+#### 6.1 获取当前锁相方式
+**GET** `/api/clock-sync-mode`
 
-通过 pmc 命令获取 PTP 锁定状态信息。
+获取当前主机的锁相方式。
+
+**响应示例**:
+```json
+{
+    "mode": "PTP",
+    "phc2sys_running": true
+}
+```
+
+**说明**:
+- `mode`: 当前锁相方式，可能的值：
+  - `"PTP"`: phc2sys服务正在运行
+  - `"internal"`: phc2sys服务未运行
+- `phc2sys_running`: phc2sys服务是否正在运行
+
+#### 6.2 设置锁相方式
+**PUT** `/api/clock-sync-mode`
+
+设置主机的锁相方式。
 
 **请求体**:
 ```json
 {
-    "domain": 127,
-    "uds_path": "/var/run/ptp4l"
+    "mode": "PTP"
 }
+```
+
+**参数说明**:
+- `mode`: 要设置的锁相方式，可选值：
+  - `"internal"`: 内部时钟模式，停止phc2sys服务
+  - `"BB"`: BB模式，停止phc2sys服务  
+  - `"PTP"`: PTP模式，启动phc2sys服务
+
+**响应示例**:
+```json
+{
+    "status": "success",
+    "message": "锁相方式已设置为: PTP",
+    "requested_mode": "PTP",
+    "current_mode": "PTP",
+    "phc2sys_running": true
+}
+```
+
+**操作逻辑**:
+- 如果传入 `"internal"` 或 `"BB"`：
+  - 如果phc2sys服务正在运行，则停止服务
+  - 如果phc2sys服务未运行，则无需操作
+- 如果传入 `"PTP"`：
+  - 如果phc2sys服务未运行，则启动服务
+  - 如果phc2sys服务正在运行，则无需操作
+
+### 7. PTP 状态监控
+
+#### 7.1 获取 PTP 时间状态
+**GET** `/api/ptp-timestatus`
+
+通过 pmc 命令获取 PTP 时间状态信息。
+
+**查询参数**:
+- `domain` (可选): PTP domain，默认为 127
+- `uds_path` (可选): UDS 路径，默认为 "/var/run/ptp4l"
+
+**示例**:
+```bash
+GET /api/ptp-timestatus
+GET /api/ptp-timestatus?domain=127&uds_path=/var/run/ptp4l
 ```
 
 **响应示例**:
 ```json
 {
+    "master_offset": 1234,
+    "ingress_time": 1234567890,
+    "cumulativeScaledRateOffset": 5678,
+    "scaledLastGmPhaseChange": 9012,
+    "gmTimeBaseIndicator": 1,
+    "lastGmPhaseChange": 3456,
     "gmPresent": "true",
     "gmIdentity": "00090d.fffe.00dd25"
 }
 ```
+
+**字段说明**:
+- `master_offset`: 当前设备与主时钟的时间偏移量（同步误差）
+- `ingress_time`: 最近接收到 PTP 消息的时间戳
+- `cumulativeScaledRateOffset`: 设备与主时钟的频率偏差
+- `scaledLastGmPhaseChange`: 主时钟最近一次相位变化的缩放值
+- `gmTimeBaseIndicator`: 主时钟时间基准指示器
+- `lastGmPhaseChange`: 主时钟最近一次相位变化的详细信息
+- `gmPresent`: 是否有主时钟存在
+- `gmIdentity`: 主时钟的唯一标识符
+
+#### 7.2 获取 PTP 端口状态
+**GET** `/api/ptp-port-status`
+
+通过 pmc 命令获取 PTP 端口状态信息。
+
+**查询参数**:
+- `domain` (可选): PTP domain，默认为 127
+- `uds_path` (可选): UDS 路径，默认为 "/var/run/ptp4l"
+
+**示例**:
+```bash
+GET /api/ptp-port-status
+GET /api/ptp-port-status?domain=127&uds_path=/var/run/ptp4l
+```
+
+**响应示例**:
+```json
+{
+    "portIdentity": "00090d.fffe.00dd25-1",
+    "portState": "SLAVE",
+    "logMinDelayReqInterval": -3,
+    "peerMeanPathDelay": 123456,
+    "logAnnounceInterval": 0,
+    "announceReceiptTimeout": 6,
+    "logSyncInterval": -3,
+    "delayMechanism": "E2E",
+    "logMinPdelayReqInterval": 0,
+    "versionNumber": 2
+}
+```
+
+**字段说明**:
+- `portIdentity`: 端口的唯一标识符
+- `portState`: 端口的当前状态（如 SLAVE 表示从时钟）
+- `logMinDelayReqInterval`: Delay_Req 消息的最小发送间隔
+- `peerMeanPathDelay`: 与对等设备的平均路径延迟
+- `logAnnounceInterval`: Announce 消息的发送间隔
+- `announceReceiptTimeout`: Announce 消息的接收超时时间
+- `logSyncInterval`: Sync 消息的发送间隔
+- `delayMechanism`: 延迟测量机制（如端到端或对等）
+- `logMinPdelayReqInterval`: Pdelay_Req 消息的最小发送间隔
+- `versionNumber`: PTP 协议版本号
+
+#### 7.3 获取 PTP 当前时间数据
+**GET** `/api/ptp-currenttimedata`
+
+通过 pmc 命令获取 PTP 当前时间数据信息。
+
+**查询参数**:
+- `domain` (可选): PTP domain，默认为 127
+- `uds_path` (可选): UDS 路径，默认为 "/var/run/ptp4l"
+
+**示例**:
+```bash
+GET /api/ptp-currenttimedata
+GET /api/ptp-currenttimedata?domain=127&uds_path=/var/run/ptp4l
+```
+
+**响应示例**:
+```json
+{
+    "stepsRemoved": 1,
+    "offsetFromMaster": 1234,
+    "meanPathDelay": 5678
+}
+```
+
+**字段说明**:
+- `stepsRemoved`: 表示从设备到主时钟之间的网络跳数，影响同步路径的复杂性
+- `offsetFromMaster`: 表示设备与主时钟的时间偏移量，是时间同步精度的关键指标
+- `meanPathDelay`: 表示设备与主时钟之间的平均路径延迟，用于网络延迟补偿
 
 ## 使用示例
 
@@ -394,11 +561,22 @@ curl http://localhost:8001/api/systemd/status/ptp4l.service
 curl http://localhost:8001/api/systemd/status/phc2sys.service
 ```
 
-9. **查看 PTP 锁定状态**:
+9. **查看 PTP 时间状态**:
 ```bash
-curl -X POST http://localhost:8001/api/ptp/status \
-     -H "Content-Type: application/json" \
-     -d '{"domain": 127, "uds_path": "/var/run/ptp4l"}'
+curl http://localhost:8001/api/ptp-timestatus
+curl http://localhost:8001/api/ptp-timestatus?domain=127&uds_path=/var/run/ptp4l
+```
+
+10. **查看 PTP 端口状态**:
+```bash
+curl http://localhost:8001/api/ptp-port-status
+curl http://localhost:8001/api/ptp-port-status?domain=127&uds_path=/var/run/ptp4l
+```
+
+11. **查看 PTP 当前时间数据**:
+```bash
+curl http://localhost:8001/api/ptp-currenttimedata
+curl http://localhost:8001/api/ptp-currenttimedata?domain=127&uds_path=/var/run/ptp4l
 ```
 
 ## 错误代码
