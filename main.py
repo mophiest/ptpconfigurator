@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Union
 import asyncio
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 PTP4L_SERVICE_PATH = "/etc/systemd/system/ptp4l.service"
 NETWORK_INFO_PATH = "/etc/linuxptp/interfaces.json"
@@ -27,7 +28,70 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="PTP Config API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理"""
+    # 启动时执行
+    logger.info("=== 服务启动信息 ===")
+    logger.info("检查必要的文件权限...")
+    
+    # 检查必要的文件权限
+    check_file_permissions(PTP4L_SERVICE_PATH)
+    check_file_permissions(PHC2SYS_SERVICE_PATH)
+    
+    # 检查并启动必要的PTP服务
+    logger.info("检查PTP服务状态...")
+    ptp4l_started = start_service_if_not_running("ptp4l.service")
+    ptp4l1_started = start_service_if_not_running("ptp4l1.service")
+    
+    if ptp4l_started and ptp4l1_started:
+        logger.info("所有PTP服务已启动或已在运行")
+        # 等待PTP服务完全启动并稳定
+        logger.info("等待PTP服务稳定运行...")
+        await asyncio.sleep(5)
+    else:
+        logger.warning("部分PTP服务启动失败，可能影响功能")
+    
+    # 检查phc2sys服务状态，如果已启动则重启以获取时钟源信息
+    logger.info("检查phc2sys服务状态...")
+    phc2sys_running = check_phc2sys_service_status()
+    if phc2sys_running:
+        logger.info("phc2sys服务正在运行，重启以获取最新时钟源信息...")
+        try:
+            result = subprocess.run(
+                ["systemctl", "restart", "phc2sys.service"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                logger.info("phc2sys服务重启成功")
+                # 等待服务完全启动
+                await asyncio.sleep(3)
+            else:
+                logger.error(f"phc2sys服务重启失败: {result.stderr}")
+        except Exception as e:
+            logger.error(f"重启phc2sys服务时发生异常: {str(e)}")
+    else:
+        logger.info("phc2sys服务未运行，无需重启")
+    
+    # 从历史日志中获取最近的时钟源信息
+    last_clock_info = await get_last_clock_source_from_logs()
+    if last_clock_info:
+        source, is_failed = last_clock_info
+        await clock_source_state.update(source, is_failed)
+        logger.info(f"已从历史日志中恢复时钟源状态: {source}")
+    
+    # 启动日志监控任务
+    asyncio.create_task(monitor_phc2sys_logs())
+    
+    yield
+    
+    # 关闭时执行
+    logger.info("服务正在关闭...")
+
+app = FastAPI(title="PTP Config API", lifespan=lifespan)
 
 # 配置 CORS
 app.add_middleware(
@@ -422,7 +486,7 @@ def update_config_file(config_path: str, key: str, value: str) -> bool:
         return False
 
 @app.get("/api/ptp-config")
-async def get_ptp_config(config_path: Optional[str] = Query(None, description="配置文件路径", example="/etc/linuxptp/ptp4l.conf")):
+async def get_ptp_config(config_path: Optional[str] = Query(None, description="配置文件路径", examples=["/etc/linuxptp/ptp4l.conf"])):
     """
     读取 PTP 配置文件内容并解析为键值对
     
@@ -480,7 +544,7 @@ async def get_ptp_config(config_path: Optional[str] = Query(None, description="�
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/ptp-config")
-async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_path: Optional[str] = Query(None, description="配置文件路径", example="/etc/linuxptp/ptp4l.conf")):
+async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_path: Optional[str] = Query(None, description="配置文件路径", examples=["/etc/linuxptp/ptp4l.conf"])):
     """
     更新配置文件中的指定键值对或完整配置
     
@@ -848,7 +912,7 @@ async def systemd_restart_service(action: ServiceAction):
 @app.get("/api/systemd/logs/{service}")
 async def systemd_logs(
     service: str,
-    lines: int = Query(100, description="日志行数", example=100)
+    lines: int = Query(100, description="日志行数", examples=[100])
 ):
     """
     获取 systemd 服务日志（最新N行）
@@ -950,8 +1014,8 @@ def get_ptp_status(request: PTPStatusRequest):
 
 @app.get("/api/ptp-timestatus")
 async def get_ptp_timestatus(
-    domain: int = Query(127, description="PTP domain值", example=127),
-    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+    domain: int = Query(127, description="PTP domain值", examples=[127]),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", examples=["/var/run/ptp4l"])
 ):
     """
     获取PTP时间状态信息
@@ -1047,8 +1111,8 @@ async def get_ptp_timestatus(
 
 @app.get("/api/ptp-port-status")
 async def get_ptp_port_status(
-    domain: int = Query(127, description="PTP domain值", example=127),
-    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+    domain: int = Query(127, description="PTP domain值", examples=[127]),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", examples=["/var/run/ptp4l"])
 ):
     """
     获取PTP端口状态信息
@@ -1148,8 +1212,8 @@ async def get_ptp_port_status(
 
 @app.get("/api/ptp-currenttimedata")
 async def get_ptp_currenttimedata(
-    domain: int = Query(127, description="PTP domain值", example=127),
-    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+    domain: int = Query(127, description="PTP domain值", examples=[127]),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", examples=["/var/run/ptp4l"])
 ):
     """
     获取PTP当前时间数据信息
@@ -1464,63 +1528,6 @@ async def get_last_clock_source_from_logs() -> Optional[tuple[str, bool]]:
     except Exception as e:
         logger.error(f"扫描历史日志时发生错误: {str(e)}")
         return None
-
-@app.on_event("startup")
-async def startup_event():
-    """服务启动时的事件处理"""
-    logger.info("=== 服务启动信息 ===")
-    logger.info("检查必要的文件权限...")
-    
-    # 检查必要的文件权限
-    check_file_permissions(PTP4L_SERVICE_PATH)
-    check_file_permissions(PHC2SYS_SERVICE_PATH)
-    
-    # 检查并启动必要的PTP服务
-    logger.info("检查PTP服务状态...")
-    ptp4l_started = start_service_if_not_running("ptp4l.service")
-    ptp4l1_started = start_service_if_not_running("ptp4l1.service")
-    
-    if ptp4l_started and ptp4l1_started:
-        logger.info("所有PTP服务已启动或已在运行")
-        # 等待PTP服务完全启动并稳定
-        logger.info("等待PTP服务稳定运行...")
-        await asyncio.sleep(5)
-    else:
-        logger.warning("部分PTP服务启动失败，可能影响功能")
-    
-    # 检查phc2sys服务状态，如果已启动则重启以获取时钟源信息
-    logger.info("检查phc2sys服务状态...")
-    phc2sys_running = check_phc2sys_service_status()
-    if phc2sys_running:
-        logger.info("phc2sys服务正在运行，重启以获取最新时钟源信息...")
-        try:
-            result = subprocess.run(
-                ["systemctl", "restart", "phc2sys.service"],
-                capture_output=True,
-                text=True,
-                timeout=30
-            )
-            
-            if result.returncode == 0:
-                logger.info("phc2sys服务重启成功")
-                # 等待服务完全启动
-                await asyncio.sleep(3)
-            else:
-                logger.error(f"phc2sys服务重启失败: {result.stderr}")
-        except Exception as e:
-            logger.error(f"重启phc2sys服务时发生异常: {str(e)}")
-    else:
-        logger.info("phc2sys服务未运行，无需重启")
-    
-    # 从历史日志中获取最近的时钟源信息
-    last_clock_info = await get_last_clock_source_from_logs()
-    if last_clock_info:
-        source, is_failed = last_clock_info
-        await clock_source_state.update(source, is_failed)
-        logger.info(f"已从历史日志中恢复时钟源状态: {source}")
-    
-    # 启动日志监控任务
-    asyncio.create_task(monitor_phc2sys_logs())
 
 @app.get("/api/systemd/service-interfaces/{service}")
 async def get_service_interfaces(service: str):
