@@ -10,6 +10,7 @@ import logging
 import subprocess
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 import asyncio
@@ -36,6 +37,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 挂载静态文件
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def root():
+    """
+    根路径，重定向到前端页面
+    """
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/static/index.html")
 
 # 全局状态管理
 class ClockSourceState:
