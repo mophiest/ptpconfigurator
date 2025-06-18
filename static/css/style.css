@@ -156,11 +156,10 @@ body {
 }
 
 .status-value {
+    text-align: left;
+    margin-left: 0;
     font-weight: 500;
     color: #2c3e50;
-    text-align: right;
-    flex: 1;
-    margin-left: 20px;
 }
 
 /* 加载动画 */
@@ -299,4 +298,133 @@ body {
 .form-select option:checked {
     background: linear-gradient(135deg, #3498db, #2980b9);
     color: white;
+}
+
+/* 状态样式 */
+.status-locked {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.status-unlocked {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.status-internal {
+    color: #17a2b8;
+    font-weight: bold;
+}
+
+.status-bb {
+    color: #ffc107;
+    font-weight: bold;
+}
+
+.status-ptp {
+    color: #28a745;
+    font-weight: bold;
+}
+
+.status-unknown {
+    color: #6c757d;
+    font-weight: bold;
+}
+
+/* PTP时钟2状态样式 */
+/* 移除强制颜色覆盖，让状态颜色能够正确显示 */
+#portState2,
+#currentPorts2,
+#ptpGmIdentity2,
+#ptpMeanPathDelay2,
+#ptpOffsetFromMaster2 {
+    font-weight: 500;
+    color: #495057;
+}
+
+/* ptpLockStatus2 不在这里定义，让它使用通用的状态颜色类 */
+
+/* 确保PTP2锁定状态的颜色能够正确显示 */
+#ptpLockStatus2.status-locked {
+    color: #28a745 !important;
+    font-weight: bold !important;
+}
+
+#ptpLockStatus2.status-unlocked {
+    color: #dc3545 !important;
+    font-weight: bold !important;
+}
+
+/* 确保PTP2端口状态的颜色能够正确显示 */
+#portState2.status-locked {
+    color: #28a745 !important;
+    font-weight: bold !important;
+}
+
+#portState2.status-unlocked {
+    color: #dc3545 !important;
+    font-weight: bold !important;
+}
+
+/* 通知样式 */
+.notification {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    padding: 12px 20px;
+    border-radius: 4px;
+    color: white;
+    font-weight: 500;
+    z-index: 1000;
+    animation: slideIn 0.3s ease-out;
+}
+
+.notification-success {
+    background-color: #28a745;
+}
+
+.notification-error {
+    background-color: #dc3545;
+}
+
+.notification-info {
+    background-color: #17a2b8;
+}
+
+.notification-warning {
+    background-color: #ffc107;
+    color: #212529;
+}
+
+@keyframes slideIn {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+/* 确保PTP1锁定状态的颜色能够正确显示 */
+#ptpLockStatus.status-locked {
+    color: #28a745 !important;
+    font-weight: bold !important;
+}
+
+#ptpLockStatus.status-unlocked {
+    color: #dc3545 !important;
+    font-weight: bold !important;
+}
+
+/* 确保PTP1端口状态的颜色能够正确显示 */
+#portState.status-locked {
+    color: #28a745 !important;
+    font-weight: bold !important;
+}
+
+#portState.status-unlocked {
+    color: #dc3545 !important;
+    font-weight: bold !important;
 } 

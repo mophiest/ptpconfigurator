@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTP2状态调试</title>
+    <link rel="stylesheet" href="css/style.css">
+    <style>
+        .debug-info {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            font-family: monospace;
+        }
+        .test-element {
+            padding: 10px;
+            margin: 10px 0;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>PTP2状态调试页面</h1>
+        
+        <div class="debug-info">
+            <h3>当前PTP2状态</h3>
+            <div id="currentStatus"></div>
+        </div>
+        
+        <div class="debug-info">
+            <h3>CSS测试</h3>
+            <div class="test-element">
+                <span id="testLocked" class="status-value status-locked">测试已锁定（绿色）</span>
+            </div>
+            <div class="test-element">
+                <span id="testUnlocked" class="status-value status-unlocked">测试未锁定（红色）</span>
+            </div>
+            <div class="test-element">
+                <span id="testPtp2Locked" class="status-value status-locked">PTP2测试已锁定</span>
+            </div>
+            <div class="test-element">
+                <span id="testPtp2Unlocked" class="status-value status-unlocked">PTP2测试未锁定</span>
+            </div>
+        </div>
+        
+        <div class="debug-info">
+            <h3>实际PTP2状态元素</h3>
+            <div class="test-element">
+                <span>锁定状态: </span>
+                <span id="ptpLockStatus2" class="status-value">加载中...</span>
+            </div>
+            <div class="test-element">
+                <span>端口状态: </span>
+                <span id="portState2" class="status-value">加载中...</span>
+            </div>
+        </div>
+        
+        <div class="debug-info">
+            <h3>JavaScript调试信息</h3>
+            <div id="debugInfo"></div>
+        </div>
+        
+        <button onclick="testPtp2Status()" class="btn btn-primary">测试PTP2状态</button>
+        <button onclick="checkCSS()" class="btn btn-primary">检查CSS</button>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8001';
+        
+        async function testPtp2Status() {
+            const debugInfo = document.getElementById('debugInfo');
+            debugInfo.innerHTML = '正在测试...';
+            
+            try {
+                // 测试时间状态
+                const timeStatusResponse = await fetch('/api/ptp-timestatus?uds_path=/var/run/ptp4l1');
+                const timeStatusData = await timeStatusResponse.json();
+                
+                // 测试端口状态
+                const portResponse = await fetch('/api/ptp-port-status?uds_path=/var/run/ptp4l1');
+                const portData = await portResponse.json();
+                
+                let debugText = '<h4>API响应:</h4>';
+                debugText += '<p><strong>时间状态:</strong> ' + JSON.stringify(timeStatusData, null, 2) + '</p>';
+                debugText += '<p><strong>端口状态:</strong> ' + JSON.stringify(portData, null, 2) + '</p>';
+                
+                if (timeStatusData.success) {
+                    const isLocked = timeStatusData.gmPresent === 'true';
+                    const lockStatus = isLocked ? '已锁定' : '未锁定';
+                    const lockClass = isLocked ? 'status-locked' : 'status-unlocked';
+                    
+                    const lockElement = document.getElementById('ptpLockStatus2');
+                    lockElement.textContent = lockStatus;
+                    lockElement.className = 'status-value ' + lockClass;
+                    
+                    debugText += '<h4>锁定状态处理:</h4>';
+                    debugText += '<p>gmPresent: ' + timeStatusData.gmPresent + '</p>';
+                    debugText += '<p>isLocked: ' + isLocked + '</p>';
+                    debugText += '<p>lockStatus: ' + lockStatus + '</p>';
+                    debugText += '<p>lockClass: ' + lockClass + '</p>';
+                    debugText += '<p>最终className: ' + lockElement.className + '</p>';
+                }
+                
+                if (portData.success) {
+                    const portState = portData.portState || 'Unknown';
+                    const portElement = document.getElementById('portState2');
+                    portElement.textContent = portState;
+                    
+                    if (portState === 'SLAVE' || portState === 'MASTER') {
+                        portElement.className = 'status-value status-locked';
+                    } else if (portState === 'FAULTY' || portState === 'LISTENING' || portState === 'UNCALIBRATED') {
+                        portElement.className = 'status-value status-unlocked';
+                    } else {
+                        portElement.className = 'status-value';
+                    }
+                    
+                    debugText += '<h4>端口状态处理:</h4>';
+                    debugText += '<p>portState: ' + portState + '</p>';
+                    debugText += '<p>最终className: ' + portElement.className + '</p>';
+                }
+                
+                debugInfo.innerHTML = debugText;
+                
+            } catch (error) {
+                debugInfo.innerHTML = '<p style="color: red;">错误: ' + error.message + '</p>';
+            }
+        }
+        
+        function checkCSS() {
+            const debugInfo = document.getElementById('debugInfo');
+            let cssInfo = '<h4>CSS检查:</h4>';
+            
+            // 检查样式表是否加载
+            const styleSheets = document.styleSheets;
+            cssInfo += '<p>已加载的样式表数量: ' + styleSheets.length + '</p>';
+            
+            for (let i = 0; i < styleSheets.length; i++) {
+                try {
+                    const rules = styleSheets[i].cssRules || styleSheets[i].rules;
+                    cssInfo += '<p>样式表 ' + i + ': ' + rules.length + ' 条规则</p>';
+                } catch (e) {
+                    cssInfo += '<p>样式表 ' + i + ': 无法访问（跨域）</p>';
+                }
+            }
+            
+            // 检查特定元素的样式
+            const lockElement = document.getElementById('ptpLockStatus2');
+            if (lockElement) {
+                const computedStyle = window.getComputedStyle(lockElement);
+                cssInfo += '<h4>ptpLockStatus2 计算样式:</h4>';
+                cssInfo += '<p>color: ' + computedStyle.color + '</p>';
+                cssInfo += '<p>font-weight: ' + computedStyle.fontWeight + '</p>';
+                cssInfo += '<p>className: ' + lockElement.className + '</p>';
+            }
+            
+            debugInfo.innerHTML = cssInfo;
+        }
+        
+        // 页面加载时自动测试
+        window.onload = function() {
+            testPtp2Status();
+        };
+    </script>
+</body>
+</html> 
