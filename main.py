@@ -8,7 +8,7 @@ import pwd
 import grp
 import logging
 import subprocess
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -156,8 +156,16 @@ class ConfigUpdate(BaseModel):
     """
     配置更新请求模型
     """
-    key: str
-    value: str
+    key: str = Field(..., description="配置项键名", example="domainNumber")
+    value: str = Field(..., description="配置项值", example="127")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "key": "domainNumber",
+                "value": "127"
+            }
+        }
 
 class PtpConfigUpdate(BaseModel):
     """
@@ -189,15 +197,38 @@ class PtpConfigUpdate(BaseModel):
         }
 
 class Ptp4lInterfaceUpdate(BaseModel):
-    interfaces: List[str] = Field(..., min_items=1, max_items=2, description="要写入的网卡名，1或2个")
-    service_name: str = Field(default="ptp4l.service", description="要修改的service文件名称")
+    interfaces: List[str] = Field(..., min_items=1, max_items=2, description="要写入的网卡名，1或2个", example=["eth0", "eth1"])
+    service_name: str = Field(default="ptp4l.service", description="要修改的service文件名称", example="ptp4l.service")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "interfaces": ["eth0", "eth1"],
+                "service_name": "ptp4l.service"
+            }
+        }
 
 class Phc2sysDomainUpdate(BaseModel):
-    domain: int
+    domain: int = Field(..., description="PTP domain值", example=127)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "domain": 127
+            }
+        }
 
 class PTPStatusRequest(BaseModel):
-    domain: int
-    uds_path: str
+    domain: int = Field(..., description="PTP domain值", example=127)
+    uds_path: str = Field(..., description="UDS地址路径", example="/var/run/ptp4l")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "domain": 127,
+                "uds_path": "/var/run/ptp4l"
+            }
+        }
 
 class PHC2SYSConfig(BaseModel):
     domain: int = Field(..., description="PTP domain值", example=127)
@@ -231,11 +262,18 @@ class PHC2SYSParams(BaseModel):
         }
 
 class ServiceAction(BaseModel):
-    service_name: str = Field(..., description="要操作的服务名称，如ptp4l.service、phc2sys.service等")
+    service_name: str = Field(..., description="要操作的服务名称，如ptp4l.service、phc2sys.service等", example="ptp4l.service")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "service_name": "ptp4l.service"
+            }
+        }
 
 class ClockSourceInfo(BaseModel):
-    current_source: Optional[str] = Field(None, description="当前选择的时钟源")
-    last_update: Optional[str] = Field(None, description="最后更新时间")
+    current_source: Optional[str] = Field(None, description="当前选择的时钟源", example="CLOCK_REALTIME")
+    last_update: Optional[str] = Field(None, description="最后更新时间", example="2024-01-01T12:00:00")
 
 class ClockSyncMode(BaseModel):
     """
@@ -247,6 +285,19 @@ class ClockSyncMode(BaseModel):
         json_schema_extra = {
             "example": {
                 "mode": "PTP"
+            }
+        }
+
+class ClockSourceUpdate(BaseModel):
+    """
+    时钟源更新请求模型
+    """
+    source: str = Field(..., description="时钟源名称", example="CLOCK_REALTIME")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "source": "CLOCK_REALTIME"
             }
         }
 
@@ -371,12 +422,15 @@ def update_config_file(config_path: str, key: str, value: str) -> bool:
         return False
 
 @app.get("/api/ptp-config")
-async def get_ptp_config(config_path: Optional[str] = None):
+async def get_ptp_config(config_path: Optional[str] = Query(None, description="配置文件路径", example="/etc/linuxptp/ptp4l.conf")):
     """
     读取 PTP 配置文件内容并解析为键值对
     
     Args:
         config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
+    
+    Returns:
+        dict: 包含解析后的配置信息
     """
     # 如果没有传入config_path，使用默认路径
     if config_path is None:
@@ -426,13 +480,16 @@ async def get_ptp_config(config_path: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/ptp-config")
-async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_path: Optional[str] = None):
+async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_path: Optional[str] = Query(None, description="配置文件路径", example="/etc/linuxptp/ptp4l.conf")):
     """
     更新配置文件中的指定键值对或完整配置
     
     Args:
         update: 包含要更新的键值对或完整配置
         config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
+    
+    Returns:
+        dict: 操作结果
     """
     try:
         # 检查是否是完整配置更新
@@ -519,6 +576,12 @@ async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_pat
 async def update_ptp4l_service_interface(update: Ptp4lInterfaceUpdate):
     """
     根据传入网卡名修改指定service文件中的ExecStart行
+    
+    Args:
+        update: 包含网络接口列表和服务名称的更新请求
+    
+    Returns:
+        dict: 操作结果
     """
     try:
         # 构造service文件路径
@@ -602,6 +665,9 @@ def get_network_interfaces_info():
 async def get_network_interfaces():
     """
     获取本地所有网络接口及状态
+    
+    Returns:
+        dict: 包含所有网络接口信息的列表
     """
     try:
         interfaces = get_network_interfaces_info()
@@ -613,7 +679,10 @@ async def get_network_interfaces():
 @app.post("/api/network-interfaces/save")
 async def save_network_interfaces():
     """
-    获取并保存本地所有网络接口及状态到文件
+    保存网络接口配置到文件
+    
+    Returns:
+        dict: 操作结果
     """
     try:
         interfaces = get_network_interfaces_info()
@@ -633,21 +702,11 @@ async def update_phc2sys_config(config: PHC2SYSParams):
     - 支持配置多组参数，每组参数包含domain和uds_address
     - 基础参数(-r -m -a)会自动保留在最后
     
-    示例：
-    ```json
-    {
-        "params": [
-            {
-                "domain": 127,
-                "uds_address": "/var/run/ptp4l1"
-            },
-            {
-                "domain": 127,
-                "uds_address": "/var/run/ptp4l"
-            }
-        ]
-    }
-    ```
+    Args:
+        config: 包含多组PHC2SYS参数的配置请求
+    
+    Returns:
+        dict: 操作结果
     """
     try:
         # 读取当前配置
@@ -683,7 +742,12 @@ async def update_phc2sys_config(config: PHC2SYSParams):
 
 @app.post("/api/systemd/reload")
 async def systemd_reload():
-    """重载 systemd 配置"""
+    """
+    重新加载systemd配置
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
         subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
         return {"success": True, "message": "systemd 配置已重载"}
@@ -693,7 +757,12 @@ async def systemd_reload():
 
 @app.post("/api/systemd/enable-ptp4l")
 async def systemd_enable_ptp4l():
-    """设置 ptp4l.service 开机自启"""
+    """
+    启用ptp4l服务
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
         subprocess.run(["sudo", "systemctl", "enable", "ptp4l.service"], check=True)
         return {"success": True, "message": "ptp4l.service 已设置为开机自启"}
@@ -703,7 +772,15 @@ async def systemd_enable_ptp4l():
 
 @app.post("/api/systemd/start-service")
 async def systemd_start_service(action: ServiceAction):
-    """启动指定的systemd服务"""
+    """
+    启动指定的systemd服务
+    
+    Args:
+        action: 包含要启动的服务名称
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
         logger.info(f"启动服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
@@ -720,7 +797,15 @@ async def systemd_start_service(action: ServiceAction):
 
 @app.post("/api/systemd/stop-service")
 async def systemd_stop_service(action: ServiceAction):
-    """停止指定的systemd服务"""
+    """
+    停止指定的systemd服务
+    
+    Args:
+        action: 包含要停止的服务名称
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
         logger.info(f"停止服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
@@ -737,7 +822,15 @@ async def systemd_stop_service(action: ServiceAction):
 
 @app.post("/api/systemd/restart-service")
 async def systemd_restart_service(action: ServiceAction):
-    """重启指定的systemd服务"""
+    """
+    重启指定的systemd服务
+    
+    Args:
+        action: 包含要重启的服务名称
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
         logger.info(f"重启服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
@@ -753,8 +846,20 @@ async def systemd_restart_service(action: ServiceAction):
         return {"success": False, "error": f"重启服务 {action.service_name} 失败: {str(e)}"}
 
 @app.get("/api/systemd/logs/{service}")
-async def systemd_logs(service: str, lines: int = 100):
-    """获取 systemd 服务日志（最新N行）"""
+async def systemd_logs(
+    service: str,
+    lines: int = Query(100, description="日志行数", example=100)
+):
+    """
+    获取 systemd 服务日志（最新N行）
+    
+    Args:
+        service: 服务名称，支持ptp4l.service、ptp4l1.service、phc2sys.service
+        lines: 要获取的日志行数，默认100行
+    
+    Returns:
+        dict: 包含服务名称和日志内容
+    """
     if service not in ["ptp4l.service", "ptp4l1.service", "phc2sys.service"]:
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
@@ -768,7 +873,15 @@ async def systemd_logs(service: str, lines: int = 100):
 
 @app.get("/api/systemd/status/{service}")
 async def systemd_status(service: str):
-    """获取 systemd 服务状态"""
+    """
+    获取 systemd 服务状态
+    
+    Args:
+        service: 服务名称，支持ptp4l.service、ptp4l1.service、phc2sys.service
+    
+    Returns:
+        dict: 包含服务名称和状态信息
+    """
     if service not in ["ptp4l.service", "ptp4l1.service", "phc2sys.service"]:
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
@@ -782,6 +895,15 @@ async def systemd_status(service: str):
 
 @app.post("/ptp/status")
 def get_ptp_status(request: PTPStatusRequest):
+    """
+    获取PTP状态信息
+    
+    Args:
+        request: 包含domain和uds_path的请求参数
+    
+    Returns:
+        dict: 包含gmPresent和gmIdentity的状态信息
+    """
     try:
         # Construct the pmc command
         cmd = [
@@ -827,10 +949,20 @@ def get_ptp_status(request: PTPStatusRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/ptp-timestatus")
-async def get_ptp_timestatus(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+async def get_ptp_timestatus(
+    domain: int = Query(127, description="PTP domain值", example=127),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+):
     """
     获取PTP时间状态信息
     通过运行 pmc -u -b 0 'GET TIME_STATUS_NP' -d {domain} -s {uds_path} 命令
+    
+    Args:
+        domain: PTP domain值，默认127
+        uds_path: UDS地址路径，默认/var/run/ptp4l
+    
+    Returns:
+        dict: 包含PTP时间状态信息
     """
     try:
         logger.info(f"获取PTP时间状态，domain: {domain}, uds_path: {uds_path}")
@@ -914,10 +1046,20 @@ async def get_ptp_timestatus(domain: int = 127, uds_path: str = "/var/run/ptp4l"
         raise HTTPException(status_code=500, detail=f"获取PTP时间状态失败: {str(e)}")
 
 @app.get("/api/ptp-port-status")
-async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+async def get_ptp_port_status(
+    domain: int = Query(127, description="PTP domain值", example=127),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+):
     """
     获取PTP端口状态信息
     通过运行 pmc -u -b 0 'GET PORT_DATA_SET' -d {domain} -s {uds_path} 命令
+    
+    Args:
+        domain: PTP domain值，默认127
+        uds_path: UDS地址路径，默认/var/run/ptp4l
+    
+    Returns:
+        dict: 包含PTP端口状态信息
     """
     try:
         logger.info(f"获取PTP端口状态，domain: {domain}, uds_path: {uds_path}")
@@ -1005,10 +1147,20 @@ async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
         raise HTTPException(status_code=500, detail=f"获取PTP端口状态失败: {str(e)}")
 
 @app.get("/api/ptp-currenttimedata")
-async def get_ptp_currenttimedata(domain: int = 127, uds_path: str = "/var/run/ptp4l"):
+async def get_ptp_currenttimedata(
+    domain: int = Query(127, description="PTP domain值", example=127),
+    uds_path: str = Query("/var/run/ptp4l", description="UDS地址路径", example="/var/run/ptp4l")
+):
     """
     获取PTP当前时间数据信息
     通过运行 pmc -u -b 0 'GET CURRENT_DATA_SET' -d {domain} -s {uds_path} 命令
+    
+    Args:
+        domain: PTP domain值，默认127
+        uds_path: UDS地址路径，默认/var/run/ptp4l
+    
+    Returns:
+        dict: 包含PTP当前时间数据信息
     """
     try:
         logger.info(f"获取PTP当前时间数据，domain: {domain}, uds_path: {uds_path}")
@@ -1079,7 +1231,12 @@ async def get_ptp_currenttimedata(domain: int = 127, uds_path: str = "/var/run/p
 
 @app.get("/api/clock-source-state")
 async def get_clock_source_state():
-    """获取时钟源状态"""
+    """
+    获取当前时钟源状态
+    
+    Returns:
+        dict: 包含当前时钟源信息
+    """
     try:
         state = await clock_source_state.get_state()
         return state
@@ -1088,10 +1245,18 @@ async def get_clock_source_state():
         raise HTTPException(status_code=500, detail="获取时钟源状态失败")
 
 @app.post("/api/clock-source-state")
-async def update_clock_source_state(source: str):
-    """更新时钟源状态"""
+async def update_clock_source_state(update: ClockSourceUpdate):
+    """
+    更新时钟源状态
+    
+    Args:
+        update: 包含时钟源名称的更新请求
+    
+    Returns:
+        dict: 操作结果
+    """
     try:
-        await clock_source_state.update(source)
+        await clock_source_state.update(update.source)
         return {"status": "success", "message": "时钟源状态已更新"}
     except Exception as e:
         logger.error(f"更新时钟源状态失败: {str(e)}")
@@ -1103,7 +1268,7 @@ async def get_clock_sync_mode():
     获取当前主机锁相方式
     
     Returns:
-        str: 当前锁相方式 ("internal", "BB", "PTP")
+        dict: 包含当前锁相方式和服务状态信息
         - 如果phc2sys服务正在运行，返回"PTP"
         - 否则返回"internal"
     """
@@ -1364,6 +1529,9 @@ async def get_service_interfaces(service: str):
     
     Args:
         service: 服务名称，如 ptp4l.service 或 ptp4l1.service
+    
+    Returns:
+        dict: 包含解析到的网络接口列表
     """
     if service not in ["ptp4l.service", "ptp4l1.service"]:
         raise HTTPException(status_code=400, detail="不支持的服务名")
