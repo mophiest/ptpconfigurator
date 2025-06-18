@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 import asyncio
 from datetime import datetime
 
@@ -88,12 +88,7 @@ class ClockSourceState:
 clock_source_state = ClockSourceState()
 
 def check_phc2sys_service_status() -> bool:
-    """
-    检查phc2sys服务是否正在运行
-    
-    Returns:
-        bool: True表示服务正在运行，False表示服务未运行
-    """
+    """检查phc2sys服务是否正在运行"""
     try:
         result = subprocess.run(
             ["systemctl", "is-active", "phc2sys.service"],
@@ -103,7 +98,46 @@ def check_phc2sys_service_status() -> bool:
         )
         return result.returncode == 0 and result.stdout.strip() == "active"
     except Exception as e:
-        logger.error(f"检查phc2sys服务状态时出错: {str(e)}")
+        logger.error(f"检查phc2sys服务状态失败: {str(e)}")
+        return False
+
+def check_service_status(service_name: str) -> bool:
+    """检查指定服务是否正在运行"""
+    try:
+        result = subprocess.run(
+            ["systemctl", "is-active", service_name],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return result.returncode == 0 and result.stdout.strip() == "active"
+    except Exception as e:
+        logger.error(f"检查{service_name}服务状态失败: {str(e)}")
+        return False
+
+def start_service_if_not_running(service_name: str) -> bool:
+    """如果服务未运行则启动服务"""
+    try:
+        if not check_service_status(service_name):
+            logger.info(f"启动{service_name}服务...")
+            result = subprocess.run(
+                ["systemctl", "start", service_name],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                logger.info(f"{service_name}服务启动成功")
+                return True
+            else:
+                logger.error(f"启动{service_name}服务失败: {result.stderr}")
+                return False
+        else:
+            logger.info(f"{service_name}服务已在运行")
+            return True
+    except Exception as e:
+        logger.error(f"启动{service_name}服务时发生异常: {str(e)}")
         return False
 
 def get_current_clock_sync_mode() -> str:
@@ -124,6 +158,35 @@ class ConfigUpdate(BaseModel):
     """
     key: str
     value: str
+
+class PtpConfigUpdate(BaseModel):
+    """
+    PTP完整配置更新请求模型
+    """
+    config_file: str = Field(..., description="配置文件路径")
+    domain: Optional[int] = Field(None, description="PTP domain")
+    priority1: Optional[int] = Field(None, description="Priority1")
+    priority2: Optional[int] = Field(None, description="Priority2")
+    logAnnounceInterval: Optional[int] = Field(None, description="Log Announce Interval")
+    announceReceiptTimeout: Optional[int] = Field(None, description="Announce Receipt Timeout")
+    logSyncInterval: Optional[int] = Field(None, description="Log Sync Interval")
+    syncReceiptTimeout: Optional[int] = Field(None, description="Sync Receipt Timeout")
+    interfaces: Optional[List[str]] = Field(None, description="网络接口列表")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "config_file": "/etc/linuxptp/ptp4l.conf",
+                "domain": 127,
+                "priority1": 128,
+                "priority2": 128,
+                "logAnnounceInterval": 0,
+                "announceReceiptTimeout": 6,
+                "logSyncInterval": -3,
+                "syncReceiptTimeout": 6,
+                "interfaces": ["eth0"]
+            }
+        }
 
 class Ptp4lInterfaceUpdate(BaseModel):
     interfaces: List[str] = Field(..., min_items=1, max_items=2, description="要写入的网卡名，1或2个")
@@ -346,12 +409,14 @@ async def get_ptp_config(config_path: Optional[str] = None):
         
         if not content:
             logger.warning("配置文件为空")
-            return {"global": {}}
+            return {"success": True, "config": {}}
         
         # 解析配置文件内容
         config_dict = parse_ptp_config(content)
         logger.info("成功解析配置文件")
-        return config_dict
+        
+        # 返回与前端期望的格式一致的数据
+        return {"success": True, "config": config_dict.get("global", {})}
         
     except PermissionError as e:
         logger.error(f"权限错误: {str(e)}")
@@ -361,34 +426,88 @@ async def get_ptp_config(config_path: Optional[str] = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/ptp-config")
-async def update_config(update: ConfigUpdate, config_path: Optional[str] = None):
+async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_path: Optional[str] = None):
     """
-    更新配置文件中的指定键值对（只用body里的key）
+    更新配置文件中的指定键值对或完整配置
     
     Args:
-        update: 包含要更新的键值对
+        update: 包含要更新的键值对或完整配置
         config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
     """
-    # 如果没有传入config_path，使用默认路径
-    if config_path is None:
-        config_path = "/etc/linuxptp/ptp4l.conf"
-        
-    key = update.key
-    value = update.value
     try:
-        logger.info(f"开始更新配置，配置文件: {config_path}, 键: {key}, 值: {value}")
-        if not os.path.exists(config_path):
-            logger.error(f"配置文件不存在: {config_path}")
-            raise HTTPException(status_code=404, detail="PTP configuration file not found")
-        if not os.access(config_path, os.W_OK):
-            logger.error("当前用户没有写入权限")
-            raise HTTPException(status_code=403, detail="没有权限修改配置文件")
-        if update_config_file(config_path, key, value):
-            logger.info("配置更新成功")
-            return {"status": "success", "message": "配置已更新", "config_path": config_path}
+        # 检查是否是完整配置更新
+        if isinstance(update, PtpConfigUpdate):
+            # 完整配置更新
+            config_file = update.config_file
+            logger.info(f"开始完整配置更新，配置文件: {config_file}")
+            
+            if not os.path.exists(config_file):
+                logger.error(f"配置文件不存在: {config_file}")
+                raise HTTPException(status_code=404, detail="PTP configuration file not found")
+            
+            if not os.access(config_file, os.W_OK):
+                logger.error("当前用户没有写入权限")
+                raise HTTPException(status_code=403, detail="没有权限修改配置文件")
+            
+            # 读取当前配置
+            with open(config_file, 'r') as f:
+                content = f.read()
+            
+            # 解析当前配置
+            config_data = parse_ptp_config(content)
+            
+            # 更新配置项
+            updates = []
+            if update.domain is not None:
+                updates.append(("domainNumber", str(update.domain)))
+            if update.priority1 is not None:
+                updates.append(("priority1", str(update.priority1)))
+            if update.priority2 is not None:
+                updates.append(("priority2", str(update.priority2)))
+            if update.logAnnounceInterval is not None:
+                updates.append(("logAnnounceInterval", str(update.logAnnounceInterval)))
+            if update.announceReceiptTimeout is not None:
+                updates.append(("announceReceiptTimeout", str(update.announceReceiptTimeout)))
+            if update.logSyncInterval is not None:
+                updates.append(("logSyncInterval", str(update.logSyncInterval)))
+            if update.syncReceiptTimeout is not None:
+                updates.append(("syncReceiptTimeout", str(update.syncReceiptTimeout)))
+            
+            # 应用所有更新
+            success = True
+            for key, value in updates:
+                if not update_config_file(config_file, key, value):
+                    success = False
+                    break
+            
+            if success:
+                logger.info("完整配置更新成功")
+                return {"success": True, "message": "配置已更新", "config_file": config_file}
+            else:
+                logger.error("完整配置更新失败")
+                raise HTTPException(status_code=400, detail="更新配置失败")
+                
         else:
-            logger.error("配置更新失败")
-            raise HTTPException(status_code=400, detail="更新配置失败")
+            # 单个键值对更新（原有逻辑）
+            if config_path is None:
+                config_path = "/etc/linuxptp/ptp4l.conf"
+                
+            key = update.key
+            value = update.value
+            logger.info(f"开始更新配置，配置文件: {config_path}, 键: {key}, 值: {value}")
+            if not os.path.exists(config_path):
+                logger.error(f"配置文件不存在: {config_path}")
+                raise HTTPException(status_code=404, detail="PTP configuration file not found")
+            if not os.access(config_path, os.W_OK):
+                logger.error("当前用户没有写入权限")
+                raise HTTPException(status_code=403, detail="没有权限修改配置文件")
+            if update_config_file(config_path, key, value):
+                logger.info("配置更新成功")
+                return {"success": True, "message": "配置已更新", "config_path": config_path}
+            else:
+                logger.error("配置更新失败")
+                raise HTTPException(status_code=400, detail="更新配置失败")
+                
     except PermissionError as e:
         logger.error(f"权限错误: {str(e)}")
         raise HTTPException(status_code=403, detail="没有权限修改配置文件")
@@ -567,100 +686,76 @@ async def systemd_reload():
     """重载 systemd 配置"""
     try:
         subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
-        return {"status": "success", "message": "systemd 配置已重载"}
+        return {"success": True, "message": "systemd 配置已重载"}
     except Exception as e:
         logger.error(f"systemd reload 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="systemd reload 失败")
+        return {"success": False, "error": "systemd reload 失败: " + str(e)}
 
 @app.post("/api/systemd/enable-ptp4l")
 async def systemd_enable_ptp4l():
     """设置 ptp4l.service 开机自启"""
     try:
         subprocess.run(["sudo", "systemctl", "enable", "ptp4l.service"], check=True)
-        return {"status": "success", "message": "ptp4l.service 已设置为开机自启"}
+        return {"success": True, "message": "ptp4l.service 已设置为开机自启"}
     except Exception as e:
         logger.error(f"enable ptp4l 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail="enable ptp4l 失败")
+        return {"success": False, "error": "enable ptp4l 失败: " + str(e)}
 
 @app.post("/api/systemd/start-service")
 async def systemd_start_service(action: ServiceAction):
     """启动指定的systemd服务"""
     try:
         logger.info(f"启动服务: {action.service_name}")
-        
-        # 验证服务名称格式
         if not action.service_name.endswith('.service'):
-            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
-        
-        # 执行启动命令
+            return {"success": False, "error": "服务名称必须以.service结尾"}
         subprocess.run(["sudo", "systemctl", "start", action.service_name], check=True)
-        
         logger.info(f"服务 {action.service_name} 启动成功")
-        return {"status": "success", "message": f"{action.service_name} 已启动", "service_name": action.service_name}
-    except HTTPException:
-        # 重新抛出HTTPException，不进行包装
-        raise
+        return {"success": True, "message": f"{action.service_name} 已启动", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
         logger.error(f"启动服务 {action.service_name} 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"启动服务 {action.service_name} 失败: {str(e)}")
+        return {"success": False, "error": f"启动服务 {action.service_name} 失败: {str(e)}"}
     except Exception as e:
         logger.error(f"启动服务 {action.service_name} 时发生错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"启动服务 {action.service_name} 失败")
+        return {"success": False, "error": f"启动服务 {action.service_name} 失败: {str(e)}"}
 
 @app.post("/api/systemd/stop-service")
 async def systemd_stop_service(action: ServiceAction):
     """停止指定的systemd服务"""
     try:
         logger.info(f"停止服务: {action.service_name}")
-        
-        # 验证服务名称格式
         if not action.service_name.endswith('.service'):
-            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
-        
-        # 执行停止命令
+            return {"success": False, "error": "服务名称必须以.service结尾"}
         subprocess.run(["sudo", "systemctl", "stop", action.service_name], check=True)
-        
         logger.info(f"服务 {action.service_name} 停止成功")
-        return {"status": "success", "message": f"{action.service_name} 已停止", "service_name": action.service_name}
-    except HTTPException:
-        # 重新抛出HTTPException，不进行包装
-        raise
+        return {"success": True, "message": f"{action.service_name} 已停止", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
         logger.error(f"停止服务 {action.service_name} 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"停止服务 {action.service_name} 失败: {str(e)}")
+        return {"success": False, "error": f"停止服务 {action.service_name} 失败: {str(e)}"}
     except Exception as e:
         logger.error(f"停止服务 {action.service_name} 时发生错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"停止服务 {action.service_name} 失败")
+        return {"success": False, "error": f"停止服务 {action.service_name} 失败: {str(e)}"}
 
 @app.post("/api/systemd/restart-service")
 async def systemd_restart_service(action: ServiceAction):
     """重启指定的systemd服务"""
     try:
         logger.info(f"重启服务: {action.service_name}")
-        
-        # 验证服务名称格式
         if not action.service_name.endswith('.service'):
-            raise HTTPException(status_code=400, detail="服务名称必须以.service结尾")
-        
-        # 执行重启命令
+            return {"success": False, "error": "服务名称必须以.service结尾"}
         subprocess.run(["sudo", "systemctl", "restart", action.service_name], check=True)
-        
         logger.info(f"服务 {action.service_name} 重启成功")
-        return {"status": "success", "message": f"{action.service_name} 已重启", "service_name": action.service_name}
-    except HTTPException:
-        # 重新抛出HTTPException，不进行包装
-        raise
+        return {"success": True, "message": f"{action.service_name} 已重启", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
         logger.error(f"重启服务 {action.service_name} 失败: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"重启服务 {action.service_name} 失败: {str(e)}")
+        return {"success": False, "error": f"重启服务 {action.service_name} 失败: {str(e)}"}
     except Exception as e:
         logger.error(f"重启服务 {action.service_name} 时发生错误: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"重启服务 {action.service_name} 失败")
+        return {"success": False, "error": f"重启服务 {action.service_name} 失败: {str(e)}"}
 
 @app.get("/api/systemd/logs/{service}")
 async def systemd_logs(service: str, lines: int = 100):
     """获取 systemd 服务日志（最新N行）"""
-    if service not in ["ptp4l.service", "phc2sys.service"]:
+    if service not in ["ptp4l.service", "ptp4l1.service", "phc2sys.service"]:
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
         result = subprocess.run([
@@ -674,7 +769,7 @@ async def systemd_logs(service: str, lines: int = 100):
 @app.get("/api/systemd/status/{service}")
 async def systemd_status(service: str):
     """获取 systemd 服务状态"""
-    if service not in ["ptp4l.service", "phc2sys.service"]:
+    if service not in ["ptp4l.service", "ptp4l1.service", "phc2sys.service"]:
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
         result = subprocess.run([
@@ -806,7 +901,7 @@ async def get_ptp_timestatus(domain: int = 127, uds_path: str = "/var/run/ptp4l"
         
         logger.info(f"PTP时间状态解析完成")
         
-        return time_status
+        return {"success": True, **time_status}
         
     except subprocess.TimeoutExpired:
         logger.error("pmc命令执行超时")
@@ -897,7 +992,7 @@ async def get_ptp_port_status(domain: int = 127, uds_path: str = "/var/run/ptp4l
         
         logger.info(f"PTP端口状态解析完成")
         
-        return port_status
+        return {"success": True, **port_status}
         
     except subprocess.TimeoutExpired:
         logger.error("pmc命令执行超时")
@@ -954,8 +1049,8 @@ async def get_ptp_currenttimedata(domain: int = 127, uds_path: str = "/var/run/p
         # 解析各种当前数据信息
         patterns = {
             "stepsRemoved": r'stepsRemoved\s+([0-9]+)',
-            "offsetFromMaster": r'offsetFromMaster\s+([0-9-]+)',
-            "meanPathDelay": r'meanPathDelay\s+([0-9]+)'
+            "offsetFromMaster": r'offsetFromMaster\s+([0-9.-]+)',
+            "meanPathDelay": r'meanPathDelay\s+([0-9.]+)'
         }
         
         for key, pattern in patterns.items():
@@ -964,13 +1059,13 @@ async def get_ptp_currenttimedata(domain: int = 127, uds_path: str = "/var/run/p
                 value = match.group(1)
                 # 对于数值类型，尝试转换为整数
                 try:
-                    current_data[key] = int(value)
+                    current_data[key] = float(value)
                 except ValueError:
                     current_data[key] = value
         
         logger.info(f"PTP当前时间数据解析完成")
         
-        return current_data
+        return {"success": True, **current_data}
         
     except subprocess.TimeoutExpired:
         logger.error("pmc命令执行超时")
@@ -1016,6 +1111,7 @@ async def get_clock_sync_mode():
         current_mode = get_current_clock_sync_mode()
         phc2sys_running = check_phc2sys_service_status()
         result = {
+            "success": True,
             "mode": current_mode,
             "phc2sys_running": phc2sys_running
         }
@@ -1101,7 +1197,7 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
         logger.info(f"锁相方式设置完成，当前模式: {current_mode}")
         
         result = {
-            "status": "success",
+            "success": True,
             "message": f"锁相方式已设置为: {mode}",
             "requested_mode": mode,
             "current_mode": current_mode,
@@ -1214,6 +1310,43 @@ async def startup_event():
     check_file_permissions(PTP4L_SERVICE_PATH)
     check_file_permissions(PHC2SYS_SERVICE_PATH)
     
+    # 检查并启动必要的PTP服务
+    logger.info("检查PTP服务状态...")
+    ptp4l_started = start_service_if_not_running("ptp4l.service")
+    ptp4l1_started = start_service_if_not_running("ptp4l1.service")
+    
+    if ptp4l_started and ptp4l1_started:
+        logger.info("所有PTP服务已启动或已在运行")
+        # 等待PTP服务完全启动并稳定
+        logger.info("等待PTP服务稳定运行...")
+        await asyncio.sleep(5)
+    else:
+        logger.warning("部分PTP服务启动失败，可能影响功能")
+    
+    # 检查phc2sys服务状态，如果已启动则重启以获取时钟源信息
+    logger.info("检查phc2sys服务状态...")
+    phc2sys_running = check_phc2sys_service_status()
+    if phc2sys_running:
+        logger.info("phc2sys服务正在运行，重启以获取最新时钟源信息...")
+        try:
+            result = subprocess.run(
+                ["systemctl", "restart", "phc2sys.service"],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                logger.info("phc2sys服务重启成功")
+                # 等待服务完全启动
+                await asyncio.sleep(3)
+            else:
+                logger.error(f"phc2sys服务重启失败: {result.stderr}")
+        except Exception as e:
+            logger.error(f"重启phc2sys服务时发生异常: {str(e)}")
+    else:
+        logger.info("phc2sys服务未运行，无需重启")
+    
     # 从历史日志中获取最近的时钟源信息
     last_clock_info = await get_last_clock_source_from_logs()
     if last_clock_info:
@@ -1223,6 +1356,43 @@ async def startup_event():
     
     # 启动日志监控任务
     asyncio.create_task(monitor_phc2sys_logs())
+
+@app.get("/api/systemd/service-interfaces/{service}")
+async def get_service_interfaces(service: str):
+    """
+    获取指定service文件中配置的网络接口
+    
+    Args:
+        service: 服务名称，如 ptp4l.service 或 ptp4l1.service
+    """
+    if service not in ["ptp4l.service", "ptp4l1.service"]:
+        raise HTTPException(status_code=400, detail="不支持的服务名")
+    
+    try:
+        service_path = f"/etc/systemd/system/{service}"
+        
+        if not os.path.exists(service_path):
+            logger.error(f"Service文件不存在: {service_path}")
+            raise HTTPException(status_code=404, detail=f"Service文件不存在: {service_path}")
+        
+        with open(service_path, 'r') as f:
+            content = f.read()
+        
+        # 解析ExecStart行中的网络接口
+        interfaces = []
+        for line in content.split('\n'):
+            if line.strip().startswith('ExecStart='):
+                # 提取 -i 参数后面的接口名
+                matches = re.findall(r'-i\s+(\S+)', line)
+                interfaces.extend(matches)
+                break
+        
+        logger.info(f"从 {service} 中解析到网络接口: {interfaces}")
+        return {"success": True, "interfaces": interfaces}
+        
+    except Exception as e:
+        logger.error(f"获取service网络接口失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"获取service网络接口失败: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

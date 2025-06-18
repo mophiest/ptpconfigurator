@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PTP系统同步配置</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⏰</text></svg>">
     <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -69,7 +70,7 @@
                     <h3 class="card-title">设置</h3>
                     <div class="form-group">
                         <label class="form-label">网络端口：</label>
-                        <select id="networkPorts" class="form-select" multiple>
+                        <select id="networkPorts" class="form-select">
                             <!-- 动态加载网络接口 -->
                         </select>
                     </div>
@@ -129,6 +130,80 @@
                         <div class="status-item">
                             <span class="status-label">时间偏差(Offset)：</span>
                             <span id="ptpOffsetFromMaster" class="status-value">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- PTP时钟2配置区域 -->
+        <section class="config-section">
+            <h2 class="section-title">PTP时钟2</h2>
+            <div class="config-card">
+                <div class="config-left">
+                    <h3 class="card-title">设置</h3>
+                    <div class="form-group">
+                        <label class="form-label">网络端口：</label>
+                        <select id="networkPorts2" class="form-select">
+                            <!-- 动态加载网络接口 -->
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">PTP Domain：</label>
+                        <input type="number" id="ptpDomain2" class="form-input" value="127">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Priority1：</label>
+                        <input type="number" id="priority1_2" class="form-input" value="128">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Priority2：</label>
+                        <input type="number" id="priority2_2" class="form-input" value="128">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Announce Interval：</label>
+                        <input type="number" id="logAnnounceInterval2" class="form-input" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">AnnounceReceiptTimeout：</label>
+                        <input type="number" id="announceReceiptTimeout2" class="form-input" value="6">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sync Interval：</label>
+                        <input type="number" id="logSyncInterval2" class="form-input" value="-3">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Sync ReceiptTimeout：</label>
+                        <input type="number" id="syncReceiptTimeout2" class="form-input" value="6">
+                    </div>
+                    <button id="submitPtpConfig2" class="btn btn-primary">提交</button>
+                </div>
+                <div class="config-right">
+                    <h3 class="card-title">状态</h3>
+                    <div class="status-info">
+                        <div class="status-item">
+                            <span class="status-label">Port Status：</span>
+                            <span id="portState2" class="status-value">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">时钟锁定状态：</span>
+                            <span id="ptpLockStatus2" class="status-value">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">当前网络端口：</span>
+                            <span id="currentPorts2" class="status-value">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">GMID：</span>
+                            <span id="ptpGmIdentity2" class="status-value">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">链路延时：</span>
+                            <span id="ptpMeanPathDelay2" class="status-value">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">时间偏差(Offset)：</span>
+                            <span id="ptpOffsetFromMaster2" class="status-value">-</span>
                         </div>
                     </div>
                 </div>
