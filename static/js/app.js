@@ -63,6 +63,14 @@ function bindEventListeners() {
     
     // PTP时钟2配置
     document.getElementById('submitPtpConfig2').addEventListener('click', submitPtpConfig2);
+    
+    // PTP时钟1服务控制
+    document.getElementById('startPtp1Service').addEventListener('click', () => controlPtpService('ptp4l.service', 'start'));
+    document.getElementById('stopPtp1Service').addEventListener('click', () => controlPtpService('ptp4l.service', 'stop'));
+    
+    // PTP时钟2服务控制
+    document.getElementById('startPtp2Service').addEventListener('click', () => controlPtpService('ptp4l1.service', 'start'));
+    document.getElementById('stopPtp2Service').addEventListener('click', () => controlPtpService('ptp4l1.service', 'stop'));
 }
 
 // 工具函数
@@ -458,7 +466,7 @@ async function loadPtpStatus2() {
 
 // 检查配置是否有变化
 function hasConfigChanged(originalConfig, newConfig) {
-    const keysToCheck = ['domain', 'priority1', 'priority2', 'logAnnounceInterval', 
+    const keysToCheck = ['domainNumber', 'priority1', 'priority2', 'logAnnounceInterval', 
                         'announceReceiptTimeout', 'logSyncInterval', 'syncReceiptTimeout', 'interfaces'];
     
     for (const key of keysToCheck) {
@@ -481,7 +489,7 @@ function hasConfigChanged(originalConfig, newConfig) {
 async function submitPtpConfig() {
     const newConfig = {
         config_file: '/etc/linuxptp/ptp4l.conf',
-        domain: parseInt(document.getElementById('ptpDomain').value),
+        domainNumber: parseInt(document.getElementById('ptpDomain').value),
         priority1: parseInt(document.getElementById('priority1').value),
         priority2: parseInt(document.getElementById('priority2').value),
         logAnnounceInterval: parseInt(document.getElementById('logAnnounceInterval').value),
@@ -588,7 +596,7 @@ async function submitPtpConfig() {
 async function submitPtpConfig2() {
     const newConfig = {
         config_file: '/etc/linuxptp/ptp4l1.conf',
-        domain: parseInt(document.getElementById('ptpDomain2').value),
+        domainNumber: parseInt(document.getElementById('ptpDomain2').value),
         priority1: parseInt(document.getElementById('priority1_2').value),
         priority2: parseInt(document.getElementById('priority2_2').value),
         logAnnounceInterval: parseInt(document.getElementById('logAnnounceInterval2').value),
@@ -727,6 +735,67 @@ function togglePtpStatusVisibility(syncMode) {
     });
 }
 
+// 获取PTP时钟1的当前配置
+async function getPtp1Config() {
+    try {
+        const response = await fetch('/api/ptp-config?config_file=/etc/linuxptp/ptp4l.conf');
+        const data = await response.json();
+        return data.success ? data.config : null;
+    } catch (error) {
+        console.error('获取PTP时钟1配置失败:', error);
+        return null;
+    }
+}
+
+// 获取PTP时钟2的当前配置
+async function getPtp2Config() {
+    try {
+        const response = await fetch('/api/ptp-config?config_file=/etc/linuxptp/ptp4l1.conf');
+        const data = await response.json();
+        return data.success ? data.config : null;
+    } catch (error) {
+        console.error('获取PTP时钟2配置失败:', error);
+        return null;
+    }
+}
+
+// 获取时钟源对应的PTP时钟映射
+async function getClockSourceMapping() {
+    try {
+        // 获取PTP时钟1的网络接口
+        const ptp1Response = await fetch('/api/systemd/service-interfaces/ptp4l.service');
+        const ptp1Data = await ptp1Response.json();
+        
+        // 获取PTP时钟2的网络接口
+        const ptp2Response = await fetch('/api/systemd/service-interfaces/ptp4l1.service');
+        const ptp2Data = await ptp2Response.json();
+        
+        const mapping = {};
+        
+        // 建立映射关系
+        if (ptp1Data.success && ptp1Data.interfaces) {
+            ptp1Data.interfaces.forEach(iface => {
+                mapping[iface] = '/var/run/ptp4l'; // PTP时钟1
+            });
+        }
+        
+        if (ptp2Data.success && ptp2Data.interfaces) {
+            ptp2Data.interfaces.forEach(iface => {
+                mapping[iface] = '/var/run/ptp4l1'; // PTP时钟2
+            });
+        }
+        
+        return mapping;
+    } catch (error) {
+        console.error('获取时钟源映射失败:', error);
+        // 返回默认映射
+        return {
+            'ens102': '/var/run/ptp4l1', // PTP时钟2
+            'ens104': '/var/run/ptp4l'   // PTP时钟1
+        };
+    }
+}
+
 // 更新系统状态
 async function updateSystemStatus() {
     try {
@@ -794,10 +863,35 @@ async function updateSystemStatus() {
                         }
                     }
                     
-                    // 获取PTP状态信息并更新系统同步状态区域
+                    // 根据当前时钟源确定对应的PTP时钟
+                    let targetUdsPath = '/var/run/ptp4l'; // 默认PTP时钟1
+                    if (clockSourceData.current_source) {
+                        // 获取时钟源映射关系
+                        const clockSourceMapping = await getClockSourceMapping();
+                        
+                        // 根据当前时钟源确定对应的PTP时钟
+                        if (clockSourceMapping[clockSourceData.current_source]) {
+                            targetUdsPath = clockSourceMapping[clockSourceData.current_source];
+                        } else {
+                            // 如果没有找到映射，使用默认值
+                            console.warn(`未找到时钟源 ${clockSourceData.current_source} 的映射，使用默认PTP时钟1`);
+                        }
+                    }
+                    
+                    // 获取对应PTP时钟的状态信息并更新系统同步状态区域
                     try {
+                        // 根据当前时钟源确定对应的PTP时钟配置
+                        let targetConfig = null;
+                        if (targetUdsPath === '/var/run/ptp4l') {
+                            targetConfig = await getPtp1Config();
+                        } else if (targetUdsPath === '/var/run/ptp4l1') {
+                            targetConfig = await getPtp2Config();
+                        }
+                        
+                        const domain = targetConfig ? parseInt(targetConfig.domainNumber) : 127; // 默认使用127
+                        
                         // 获取时间状态（包含GM Identity）
-                        const timeStatusResponse = await fetch('/api/ptp-timestatus?uds_path=/var/run/ptp4l');
+                        const timeStatusResponse = await fetch(`/api/ptp-timestatus?uds_path=${targetUdsPath}&domain=${domain}`);
                         const timeStatusData = await timeStatusResponse.json();
                         
                         if (timeStatusData.success) {
@@ -808,7 +902,7 @@ async function updateSystemStatus() {
                         }
                         
                         // 获取当前时间数据
-                        const timeResponse = await fetch('/api/ptp-currenttimedata?uds_path=/var/run/ptp4l');
+                        const timeResponse = await fetch(`/api/ptp-currenttimedata?uds_path=${targetUdsPath}&domain=${domain}`);
                         const timeData = await timeResponse.json();
                         
                         if (timeData.success) {
@@ -853,8 +947,12 @@ async function updateSystemStatus() {
 // 更新PTP时钟1状态
 async function updatePtpStatus() {
     try {
+        // 获取PTP时钟1的当前配置
+        const ptp1Config = await getPtp1Config();
+        const domain = ptp1Config ? parseInt(ptp1Config.domainNumber) : 127; // 默认使用127
+        
         // 获取时间状态（包含GM Identity）
-        const timeStatusResponse = await fetch('/api/ptp-timestatus?uds_path=/var/run/ptp4l');
+        const timeStatusResponse = await fetch(`/api/ptp-timestatus?uds_path=/var/run/ptp4l&domain=${domain}`);
         const timeStatusData = await timeStatusResponse.json();
         
         if (timeStatusData.success) {
@@ -871,7 +969,7 @@ async function updatePtpStatus() {
         }
         
         // 获取端口状态
-        const portResponse = await fetch('/api/ptp-port-status?uds_path=/var/run/ptp4l');
+        const portResponse = await fetch(`/api/ptp-port-status?uds_path=/var/run/ptp4l&domain=${domain}`);
         const portData = await portResponse.json();
         
         if (portData.success) {
@@ -890,7 +988,7 @@ async function updatePtpStatus() {
         }
         
         // 获取当前时间数据
-        const timeResponse = await fetch('/api/ptp-currenttimedata?uds_path=/var/run/ptp4l');
+        const timeResponse = await fetch(`/api/ptp-currenttimedata?uds_path=/var/run/ptp4l&domain=${domain}`);
         const timeData = await timeResponse.json();
         
         if (timeData.success) {
@@ -908,8 +1006,12 @@ async function updatePtpStatus() {
 // 更新PTP时钟2状态
 async function updatePtpStatus2() {
     try {
+        // 获取PTP时钟2的当前配置
+        const ptp2Config = await getPtp2Config();
+        const domain = ptp2Config ? parseInt(ptp2Config.domainNumber) : 127; // 默认使用127
+        
         // 获取时间状态（包含GM Identity）
-        const timeStatusResponse = await fetch('/api/ptp-timestatus?uds_path=/var/run/ptp4l1');
+        const timeStatusResponse = await fetch(`/api/ptp-timestatus?uds_path=/var/run/ptp4l1&domain=${domain}`);
         const timeStatusData = await timeStatusResponse.json();
         
         if (timeStatusData.success) {
@@ -926,7 +1028,7 @@ async function updatePtpStatus2() {
         }
         
         // 获取端口状态
-        const portResponse = await fetch('/api/ptp-port-status?uds_path=/var/run/ptp4l1');
+        const portResponse = await fetch(`/api/ptp-port-status?uds_path=/var/run/ptp4l1&domain=${domain}`);
         const portData = await portResponse.json();
         
         if (portData.success) {
@@ -945,7 +1047,7 @@ async function updatePtpStatus2() {
         }
         
         // 获取当前时间数据
-        const timeResponse = await fetch('/api/ptp-currenttimedata?uds_path=/var/run/ptp4l1');
+        const timeResponse = await fetch(`/api/ptp-currenttimedata?uds_path=/var/run/ptp4l1&domain=${domain}`);
         const timeData = await timeResponse.json();
         
         if (timeData.success) {
@@ -957,5 +1059,45 @@ async function updatePtpStatus2() {
         }
     } catch (error) {
         console.error('更新PTP时钟2状态失败:', error);
+    }
+}
+
+// 控制PTP服务
+async function controlPtpService(serviceName, action) {
+    try {
+        showLoading();
+        
+        const endpoint = action === 'start' ? '/api/systemd/start-service' : '/api/systemd/stop-service';
+        const response = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ service_name: serviceName })
+        });
+        
+        const data = await response.json();
+        
+        if (data.success) {
+            const actionText = action === 'start' ? '启动' : '停止';
+            showNotification(`${serviceName} ${actionText}成功`, 'success');
+            
+            // 延迟更新状态，给服务一些启动/停止的时间
+            setTimeout(() => {
+                if (serviceName === 'ptp4l.service') {
+                    updatePtpStatus();
+                } else if (serviceName === 'ptp4l1.service') {
+                    updatePtpStatus2();
+                }
+            }, 2000);
+        } else {
+            const actionText = action === 'start' ? '启动' : '停止';
+            showNotification(`${serviceName} ${actionText}失败: ${data.error}`, 'error');
+        }
+    } catch (error) {
+        const actionText = action === 'start' ? '启动' : '停止';
+        showNotification(`${serviceName} ${actionText}失败: ${error.message}`, 'error');
+    } finally {
+        hideLoading();
     }
 } 

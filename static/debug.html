@@ -3,167 +3,205 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PTP2状态调试</title>
-    <link rel="stylesheet" href="css/style.css">
+    <title>PTP配置调试</title>
     <style>
-        .debug-info {
-            background: #f8f9fa;
-            border: 1px solid #dee2e6;
-            border-radius: 8px;
-            padding: 20px;
-            margin: 20px 0;
-            font-family: monospace;
-        }
-        .test-element {
-            padding: 10px;
-            margin: 10px 0;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-        }
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ccc; }
+        button { padding: 10px 20px; margin: 5px; }
+        .result { margin-top: 10px; padding: 10px; background: #f0f0f0; }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>PTP2状态调试页面</h1>
-        
-        <div class="debug-info">
-            <h3>当前PTP2状态</h3>
-            <div id="currentStatus"></div>
-        </div>
-        
-        <div class="debug-info">
-            <h3>CSS测试</h3>
-            <div class="test-element">
-                <span id="testLocked" class="status-value status-locked">测试已锁定（绿色）</span>
-            </div>
-            <div class="test-element">
-                <span id="testUnlocked" class="status-value status-unlocked">测试未锁定（红色）</span>
-            </div>
-            <div class="test-element">
-                <span id="testPtp2Locked" class="status-value status-locked">PTP2测试已锁定</span>
-            </div>
-            <div class="test-element">
-                <span id="testPtp2Unlocked" class="status-value status-unlocked">PTP2测试未锁定</span>
-            </div>
-        </div>
-        
-        <div class="debug-info">
-            <h3>实际PTP2状态元素</h3>
-            <div class="test-element">
-                <span>锁定状态: </span>
-                <span id="ptpLockStatus2" class="status-value">加载中...</span>
-            </div>
-            <div class="test-element">
-                <span>端口状态: </span>
-                <span id="portState2" class="status-value">加载中...</span>
-            </div>
-        </div>
-        
-        <div class="debug-info">
-            <h3>JavaScript调试信息</h3>
-            <div id="debugInfo"></div>
-        </div>
-        
-        <button onclick="testPtp2Status()" class="btn btn-primary">测试PTP2状态</button>
-        <button onclick="checkCSS()" class="btn btn-primary">检查CSS</button>
+    <h1>PTP配置调试页面</h1>
+    
+    <div class="test-section">
+        <h3>测试PTP时钟1配置提交</h3>
+        <button onclick="testPtp1Submit()">测试PTP1提交</button>
+        <div id="result1" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>测试PTP时钟2配置提交</h3>
+        <button onclick="testPtp2Submit()">测试PTP2提交</button>
+        <div id="result2" class="result"></div>
+    </div>
+    
+    <div class="test-section">
+        <h3>测试API调用</h3>
+        <button onclick="testApiCall()">测试API</button>
+        <div id="result3" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>测试时钟源映射</h3>
+        <button onclick="testClockSourceMapping()">测试映射</button>
+        <div id="result4" class="result"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>测试动态Domain获取</h3>
+        <button onclick="testDynamicDomain()">测试动态Domain</button>
+        <div id="result5" class="result"></div>
     </div>
 
     <script>
-        const API_BASE_URL = 'http://localhost:8001';
-        
-        async function testPtp2Status() {
-            const debugInfo = document.getElementById('debugInfo');
-            debugInfo.innerHTML = '正在测试...';
+        async function testClockSourceMapping() {
+            const resultDiv = document.getElementById('result4');
+            resultDiv.innerHTML = '测试中...';
             
             try {
-                // 测试时间状态
-                const timeStatusResponse = await fetch('/api/ptp-timestatus?uds_path=/var/run/ptp4l1');
-                const timeStatusData = await timeStatusResponse.json();
+                // 获取时钟源状态
+                const clockSourceResponse = await fetch('/api/clock-source-state');
+                const clockSourceData = await clockSourceResponse.json();
                 
-                // 测试端口状态
-                const portResponse = await fetch('/api/ptp-port-status?uds_path=/var/run/ptp4l1');
-                const portData = await portResponse.json();
+                // 获取PTP服务接口配置
+                const ptp1Response = await fetch('/api/systemd/service-interfaces/ptp4l.service');
+                const ptp1Data = await ptp1Response.json();
                 
-                let debugText = '<h4>API响应:</h4>';
-                debugText += '<p><strong>时间状态:</strong> ' + JSON.stringify(timeStatusData, null, 2) + '</p>';
-                debugText += '<p><strong>端口状态:</strong> ' + JSON.stringify(portData, null, 2) + '</p>';
+                const ptp2Response = await fetch('/api/systemd/service-interfaces/ptp4l1.service');
+                const ptp2Data = await ptp2Response.json();
                 
-                if (timeStatusData.success) {
-                    const isLocked = timeStatusData.gmPresent === 'true';
-                    const lockStatus = isLocked ? '已锁定' : '未锁定';
-                    const lockClass = isLocked ? 'status-locked' : 'status-unlocked';
-                    
-                    const lockElement = document.getElementById('ptpLockStatus2');
-                    lockElement.textContent = lockStatus;
-                    lockElement.className = 'status-value ' + lockClass;
-                    
-                    debugText += '<h4>锁定状态处理:</h4>';
-                    debugText += '<p>gmPresent: ' + timeStatusData.gmPresent + '</p>';
-                    debugText += '<p>isLocked: ' + isLocked + '</p>';
-                    debugText += '<p>lockStatus: ' + lockStatus + '</p>';
-                    debugText += '<p>lockClass: ' + lockClass + '</p>';
-                    debugText += '<p>最终className: ' + lockElement.className + '</p>';
+                // 构建映射关系
+                const mapping = {};
+                if (ptp1Data.success && ptp1Data.interfaces) {
+                    ptp1Data.interfaces.forEach(iface => {
+                        mapping[iface] = '/var/run/ptp4l';
+                    });
+                }
+                if (ptp2Data.success && ptp2Data.interfaces) {
+                    ptp2Data.interfaces.forEach(iface => {
+                        mapping[iface] = '/var/run/ptp4l1';
+                    });
                 }
                 
-                if (portData.success) {
-                    const portState = portData.portState || 'Unknown';
-                    const portElement = document.getElementById('portState2');
-                    portElement.textContent = portState;
-                    
-                    if (portState === 'SLAVE' || portState === 'MASTER') {
-                        portElement.className = 'status-value status-locked';
-                    } else if (portState === 'FAULTY' || portState === 'LISTENING' || portState === 'UNCALIBRATED') {
-                        portElement.className = 'status-value status-unlocked';
-                    } else {
-                        portElement.className = 'status-value';
-                    }
-                    
-                    debugText += '<h4>端口状态处理:</h4>';
-                    debugText += '<p>portState: ' + portState + '</p>';
-                    debugText += '<p>最终className: ' + portElement.className + '</p>';
-                }
+                // 确定当前时钟源对应的PTP时钟
+                const currentSource = clockSourceData.current_source;
+                const targetUdsPath = mapping[currentSource] || '/var/run/ptp4l';
                 
-                debugInfo.innerHTML = debugText;
+                const result = {
+                    current_clock_source: currentSource,
+                    mapping: mapping,
+                    target_ptp_clock: targetUdsPath,
+                    clock_source_status: clockSourceData
+                };
                 
+                resultDiv.innerHTML = `结果: ${JSON.stringify(result, null, 2)}`;
             } catch (error) {
-                debugInfo.innerHTML = '<p style="color: red;">错误: ' + error.message + '</p>';
+                resultDiv.innerHTML = `错误: ${error.message}`;
             }
         }
         
-        function checkCSS() {
-            const debugInfo = document.getElementById('debugInfo');
-            let cssInfo = '<h4>CSS检查:</h4>';
+        async function testPtp1Submit() {
+            const resultDiv = document.getElementById('result1');
+            resultDiv.innerHTML = '测试中...';
             
-            // 检查样式表是否加载
-            const styleSheets = document.styleSheets;
-            cssInfo += '<p>已加载的样式表数量: ' + styleSheets.length + '</p>';
+            try {
+                const newConfig = {
+                    config_file: '/etc/linuxptp/ptp4l.conf',
+                    priority1: 125
+                };
+                
+                const response = await fetch('/api/ptp-config', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(newConfig)
+                });
+                
+                const data = await response.json();
+                resultDiv.innerHTML = `结果: ${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                resultDiv.innerHTML = `错误: ${error.message}`;
+            }
+        }
+        
+        async function testPtp2Submit() {
+            const resultDiv = document.getElementById('result2');
+            resultDiv.innerHTML = '测试中...';
             
-            for (let i = 0; i < styleSheets.length; i++) {
-                try {
-                    const rules = styleSheets[i].cssRules || styleSheets[i].rules;
-                    cssInfo += '<p>样式表 ' + i + ': ' + rules.length + ' 条规则</p>';
-                } catch (e) {
-                    cssInfo += '<p>样式表 ' + i + ': 无法访问（跨域）</p>';
+            try {
+                const newConfig = {
+                    config_file: '/etc/linuxptp/ptp4l1.conf',
+                    priority1: 127
+                };
+                
+                const response = await fetch('/api/ptp-config', {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(newConfig)
+                });
+                
+                const data = await response.json();
+                resultDiv.innerHTML = `结果: ${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                resultDiv.innerHTML = `错误: ${error.message}`;
+            }
+        }
+        
+        async function testApiCall() {
+            const resultDiv = document.getElementById('result3');
+            resultDiv.innerHTML = '测试中...';
+            
+            try {
+                const response = await fetch('/api/ptp-config?config_file=/etc/linuxptp/ptp4l.conf');
+                const data = await response.json();
+                resultDiv.innerHTML = `结果: ${JSON.stringify(data, null, 2)}`;
+            } catch (error) {
+                resultDiv.innerHTML = `错误: ${error.message}`;
+            }
+        }
+
+        async function testDynamicDomain() {
+            const resultDiv = document.getElementById('result5');
+            resultDiv.innerHTML = '测试中...';
+            
+            try {
+                // 获取PTP时钟1配置
+                const ptp1Response = await fetch('/api/ptp-config?config_file=/etc/linuxptp/ptp4l.conf');
+                const ptp1Data = await ptp1Response.json();
+                
+                // 获取PTP时钟2配置
+                const ptp2Response = await fetch('/api/ptp-config?config_file=/etc/linuxptp/ptp4l1.conf');
+                const ptp2Data = await ptp2Response.json();
+                
+                let result = '<h4>PTP时钟配置：</h4>';
+                
+                if (ptp1Data.success) {
+                    const domain1 = ptp1Data.config.domainNumber;
+                    result += `<p><strong>PTP时钟1:</strong> domain=${domain1}</p>`;
+                    
+                    // 使用配置的domain获取状态
+                    const status1Response = await fetch(`/api/ptp-timestatus?uds_path=/var/run/ptp4l&domain=${domain1}`);
+                    const status1Data = await status1Response.json();
+                    result += `<p><strong>PTP时钟1状态:</strong> ${status1Data.success ? '成功' : '失败'}</p>`;
+                    if (status1Data.success) {
+                        result += `<p>GM Identity: ${status1Data.gmIdentity || 'Unknown'}</p>`;
+                        result += `<p>GM Present: ${status1Data.gmPresent || 'Unknown'}</p>`;
+                    }
                 }
+                
+                if (ptp2Data.success) {
+                    const domain2 = ptp2Data.config.domainNumber;
+                    result += `<p><strong>PTP时钟2:</strong> domain=${domain2}</p>`;
+                    
+                    // 使用配置的domain获取状态
+                    const status2Response = await fetch(`/api/ptp-timestatus?uds_path=/var/run/ptp4l1&domain=${domain2}`);
+                    const status2Data = await status2Response.json();
+                    result += `<p><strong>PTP时钟2状态:</strong> ${status2Data.success ? '成功' : '失败'}</p>`;
+                    if (status2Data.success) {
+                        result += `<p>GM Identity: ${status2Data.gmIdentity || 'Unknown'}</p>`;
+                        result += `<p>GM Present: ${status2Data.gmPresent || 'Unknown'}</p>`;
+                    }
+                }
+                
+                resultDiv.innerHTML = result;
+            } catch (error) {
+                resultDiv.innerHTML = `测试失败: ${error.message}`;
             }
-            
-            // 检查特定元素的样式
-            const lockElement = document.getElementById('ptpLockStatus2');
-            if (lockElement) {
-                const computedStyle = window.getComputedStyle(lockElement);
-                cssInfo += '<h4>ptpLockStatus2 计算样式:</h4>';
-                cssInfo += '<p>color: ' + computedStyle.color + '</p>';
-                cssInfo += '<p>font-weight: ' + computedStyle.fontWeight + '</p>';
-                cssInfo += '<p>className: ' + lockElement.className + '</p>';
-            }
-            
-            debugInfo.innerHTML = cssInfo;
         }
-        
-        // 页面加载时自动测试
-        window.onload = function() {
-            testPtp2Status();
-        };
     </script>
 </body>
 </html> 

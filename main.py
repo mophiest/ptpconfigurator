@@ -236,7 +236,7 @@ class PtpConfigUpdate(BaseModel):
     PTP完整配置更新请求模型
     """
     config_file: str = Field(..., description="配置文件路径")
-    domain: Optional[int] = Field(None, description="PTP domain")
+    domainNumber: Optional[int] = Field(None, description="PTP domain")
     priority1: Optional[int] = Field(None, description="Priority1")
     priority2: Optional[int] = Field(None, description="Priority2")
     logAnnounceInterval: Optional[int] = Field(None, description="Log Announce Interval")
@@ -249,7 +249,7 @@ class PtpConfigUpdate(BaseModel):
         json_schema_extra = {
             "example": {
                 "config_file": "/etc/linuxptp/ptp4l.conf",
-                "domain": 127,
+                "domainNumber": 127,
                 "priority1": 128,
                 "priority2": 128,
                 "logAnnounceInterval": 0,
@@ -486,18 +486,24 @@ def update_config_file(config_path: str, key: str, value: str) -> bool:
         return False
 
 @app.get("/api/ptp-config")
-async def get_ptp_config(config_path: Optional[str] = Query(None, description="配置文件路径", examples=["/etc/linuxptp/ptp4l.conf"])):
+async def get_ptp_config(
+    config_path: Optional[str] = Query(None, description="配置文件路径", examples=["/etc/linuxptp/ptp4l.conf"]),
+    config_file: Optional[str] = Query(None, description="配置文件路径（兼容参数）", examples=["/etc/linuxptp/ptp4l.conf"])
+):
     """
     读取 PTP 配置文件内容并解析为键值对
     
     Args:
         config_path: 可选的配置文件路径，默认为 /etc/linuxptp/ptp4l.conf
+        config_file: 可选的配置文件路径（兼容参数），默认为 /etc/linuxptp/ptp4l.conf
     
     Returns:
         dict: 包含解析后的配置信息
     """
-    # 如果没有传入config_path，使用默认路径
-    if config_path is None:
+    # 优先使用config_file参数，如果没有则使用config_path，都没有则使用默认路径
+    if config_file is not None:
+        config_path = config_file
+    elif config_path is None:
         config_path = "/etc/linuxptp/ptp4l.conf"
     
     try:
@@ -579,8 +585,24 @@ async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_pat
             
             # 更新配置项
             updates = []
-            if update.domain is not None:
-                updates.append(("domainNumber", str(update.domain)))
+            domain_changed = False
+            old_domain = None
+            
+            # 获取当前domain值
+            if 'domainNumber' in config_data.get('global', {}):
+                old_domain = int(config_data['global']['domainNumber'])
+            elif 'domainNumber' in config_data:
+                old_domain = int(config_data['domainNumber'])
+            
+            if update.domainNumber is not None:
+                new_domain = update.domainNumber
+                updates.append(("domainNumber", str(new_domain)))
+                
+                # 检查domain是否发生更改
+                if old_domain is not None and old_domain != new_domain:
+                    domain_changed = True
+                    logger.info(f"检测到domain更改: {old_domain} -> {new_domain}")
+            
             if update.priority1 is not None:
                 updates.append(("priority1", str(update.priority1)))
             if update.priority2 is not None:
@@ -603,6 +625,45 @@ async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_pat
             
             if success:
                 logger.info("完整配置更新成功")
+                
+                # 如果domain发生更改，同步更新phc2sys配置
+                if domain_changed and update.domainNumber is not None:
+                    logger.info("开始同步更新phc2sys.service配置")
+                    
+                    # 更新phc2sys配置
+                    if update_phc2sys_domain(update.domainNumber, config_file):
+                        logger.info("phc2sys.service配置更新成功")
+                        
+                        # 重新加载systemd配置
+                        try:
+                            result = subprocess.run(['systemctl', 'daemon-reload'], 
+                                                  capture_output=True, text=True, timeout=10)
+                            if result.returncode == 0:
+                                logger.info("systemd配置重新加载成功")
+                            else:
+                                logger.warning(f"systemd配置重新加载失败: {result.stderr}")
+                        except Exception as e:
+                            logger.error(f"重新加载systemd配置失败: {str(e)}")
+                        
+                        # 检查phc2sys服务状态，如果在运行则重启
+                        try:
+                            result = subprocess.run(['systemctl', 'is-active', 'phc2sys.service'], 
+                                                  capture_output=True, text=True, timeout=5)
+                            if result.returncode == 0 and result.stdout.strip() == 'active':
+                                logger.info("phc2sys.service正在运行，准备重启")
+                                restart_result = subprocess.run(['systemctl', 'restart', 'phc2sys.service'], 
+                                                              capture_output=True, text=True, timeout=10)
+                                if restart_result.returncode == 0:
+                                    logger.info("phc2sys.service重启成功")
+                                else:
+                                    logger.error(f"phc2sys.service重启失败: {restart_result.stderr}")
+                            else:
+                                logger.info("phc2sys.service未运行，仅重新加载配置")
+                        except Exception as e:
+                            logger.error(f"检查phc2sys.service状态失败: {str(e)}")
+                    else:
+                        logger.error("phc2sys.service配置更新失败")
+                
                 return {"success": True, "message": "配置已更新", "config_file": config_file}
             else:
                 logger.error("完整配置更新失败")
@@ -1568,6 +1629,63 @@ async def get_service_interfaces(service: str):
     except Exception as e:
         logger.error(f"获取service网络接口失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取service网络接口失败: {str(e)}")
+
+def update_phc2sys_domain(new_domain: int, config_file: str) -> bool:
+    """
+    更新phc2sys.service配置中对应PTP时钟的domain参数（健壮分割法）
+    Args:
+        new_domain: 新的domain值
+        config_file: PTP配置文件路径，用于确定要更新哪个时钟的domain
+    Returns:
+        bool: 更新是否成功
+    """
+    try:
+        service_path = "/etc/systemd/system/phc2sys.service"
+        if not os.path.exists(service_path):
+            logger.error(f"phc2sys.service文件不存在: {service_path}")
+            return False
+        # 根据配置文件路径确定对应的UDS路径
+        target_uds = None
+        if config_file == "/etc/linuxptp/ptp4l.conf":
+            target_uds = "/var/run/ptp4l"
+        elif config_file == "/etc/linuxptp/ptp4l1.conf":
+            target_uds = "/var/run/ptp4l1"
+        else:
+            logger.error(f"无法确定配置文件 {config_file} 对应的UDS路径")
+            return False
+        logger.info(f"更新phc2sys.service中 {target_uds} 对应的domain参数为: {new_domain}")
+        with open(service_path, 'r') as f:
+            lines = f.readlines()
+        new_lines = []
+        updated = False
+        for line in lines:
+            if line.strip().startswith("ExecStart="):
+                rest = line.split('ExecStart=', 1)[1].strip()
+                parts = rest.split()
+                i = 0
+                while i < len(parts):
+                    if parts[i] == "-z" and i+2 < len(parts) and parts[i+1] == target_uds and parts[i+2] == "-n":
+                        old_domain = parts[i+3] if i+3 < len(parts) else None
+                        logger.info(f"将 {target_uds} 的domain从{old_domain}改为{new_domain}")
+                        parts[i+3] = str(new_domain)
+                        updated = True
+                        i += 4
+                    else:
+                        i += 1
+                new_rest = ' '.join(parts)
+                new_lines.append(f"ExecStart={new_rest}\n")
+            else:
+                new_lines.append(line)
+        if not updated:
+            logger.error(f"未找到 {target_uds} 对应的domain参数")
+            return False
+        with open(service_path, 'w') as f:
+            f.writelines(new_lines)
+        logger.info("phc2sys.service配置更新成功")
+        return True
+    except Exception as e:
+        logger.error(f"更新phc2sys.service配置失败: {str(e)}")
+        return False
 
 if __name__ == "__main__":
     import uvicorn
