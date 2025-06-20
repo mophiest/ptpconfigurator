@@ -28,6 +28,15 @@
                             <option value="PTP">PTP</option>
                         </select>
                     </div>
+                    <div class="form-group" id="primaryClockGroup" style="display: none;">
+                        <label class="form-label">主路时钟：</label>
+                        <select id="primaryClock" class="form-select">
+                            <option value="ptp1">PTP时钟1</option>
+                            <option value="ptp2">PTP时钟2</option>
+                        </select>
+                        <small style="color: #6c757d;">（选择主路时钟，备路时钟将自动确定）</small>
+                    </div>
+                    
                     <button id="submitSyncMode" class="btn btn-primary">提交</button>
                 </div>
                 <div class="config-right">
@@ -48,10 +57,6 @@
                         <div class="status-item">
                             <span class="status-label">GMID：</span>
                             <span id="gmIdentity" class="status-value">-</span>
-                        </div>
-                        <div class="status-item">
-                            <span class="status-label">链路延时：</span>
-                            <span id="meanPathDelay" class="status-value">-</span>
                         </div>
                         <div class="status-item">
                             <span class="status-label">时间偏差(Offset)：</span>
@@ -229,5 +234,120 @@
     <div id="message" class="message hidden"></div>
 
     <script src="js/app.js"></script>
+    
+    <!-- 确保主路时钟功能正常工作 -->
+    <script>
+        // 确保togglePrimaryClockVisibility函数可用
+        window.togglePrimaryClockVisibility = window.togglePrimaryClockVisibility || function(mode) {
+            const primaryClockGroup = document.getElementById('primaryClockGroup');
+            if (primaryClockGroup) {
+                if (mode === 'PTP') {
+                    primaryClockGroup.style.display = 'block';
+                } else {
+                    primaryClockGroup.style.display = 'none';
+                }
+            }
+        };
+        
+                 // 自定义提交函数
+         window.customSubmitSyncMode = async function() {
+             const mode = document.getElementById('syncMode').value;
+             const primaryClock = document.getElementById('primaryClock');
+             
+             if (!primaryClock) {
+                 return;
+             }
+             
+             const requestData = {
+                 mode: mode,
+                 primary_clock: primaryClock.value
+             };
+             
+             try {
+                 const response = await fetch('/api/clock-sync-mode', {
+                     method: 'PUT',
+                     headers: {
+                         'Content-Type': 'application/json'
+                     },
+                     body: JSON.stringify(requestData)
+                 });
+                 
+                 const data = await response.json();
+                 
+                 if (data.success) {
+                     // 使用系统通知而不是弹框
+                     if (typeof showNotification === 'function') {
+                         showNotification('同步模式设置成功', 'success');
+                     }
+                 } else {
+                     if (typeof showNotification === 'function') {
+                         showNotification('同步模式设置失败: ' + data.error, 'error');
+                     }
+                 }
+             } catch (error) {
+                 if (typeof showNotification === 'function') {
+                     showNotification('同步模式设置失败: ' + error.message, 'error');
+                 }
+             }
+         };
+        
+        // 当DOM加载完成时，设置正确的显示状态并绑定事件
+        document.addEventListener('DOMContentLoaded', function() {
+            setTimeout(async () => {
+                try {
+                    // 获取当前同步模式
+                    const response = await fetch('/api/clock-sync-mode');
+                    const data = await response.json();
+                    
+                    if (data.success) {
+                        const syncMode = document.getElementById('syncMode');
+                        if (syncMode) {
+                            syncMode.value = data.mode;
+                            window.togglePrimaryClockVisibility(data.mode);
+                            
+                            // 绑定change事件
+                            syncMode.addEventListener('change', function(e) {
+                                window.togglePrimaryClockVisibility(e.target.value);
+                            });
+                        }
+                        
+                        // 加载主路时钟配置
+                        if (data.mode === 'PTP') {
+                            try {
+                                const primaryResponse = await fetch('/api/primary-clock');
+                                const primaryData = await primaryResponse.json();
+                                if (primaryData.success) {
+                                    const primaryClockSelect = document.getElementById('primaryClock');
+                                    if (primaryClockSelect) {
+                                        primaryClockSelect.value = primaryData.primary_clock;
+                                    }
+                                }
+                            } catch (error) {
+                                console.error('加载主路时钟配置失败:', error);
+                            }
+                        }
+                    }
+                } catch (error) {
+                    console.error('加载同步模式失败:', error);
+                }
+            }, 500);
+            
+            // 绑定自定义提交函数
+            setTimeout(() => {
+                const submitBtn = document.getElementById('submitSyncMode');
+                if (submitBtn) {
+                    // 移除所有现有的事件监听器
+                    submitBtn.onclick = null;
+                    
+                    // 绑定新的点击事件
+                                         submitBtn.addEventListener('click', function(e) {
+                         e.preventDefault();
+                         e.stopPropagation();
+                         window.customSubmitSyncMode();
+                     });
+                }
+            }, 1000);
+        });
+    </script>
 </body>
 </html> 

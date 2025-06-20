@@ -8,8 +8,27 @@ let statusUpdateInterval;
 let originalPtp1Config = {};
 let originalPtp2Config = {};
 
+// 控制主路时钟选择的显示/隐藏 - 提前定义
+window.togglePrimaryClockVisibility = function(mode) {
+    console.log('togglePrimaryClockVisibility 被调用, mode:', mode);
+    const primaryClockGroup = document.getElementById('primaryClockGroup');
+    if (!primaryClockGroup) {
+        console.error('找不到 primaryClockGroup 元素');
+        return;
+    }
+    
+    if (mode === 'PTP') {
+        console.log('显示主路时钟选择框');
+        primaryClockGroup.style.display = 'block';
+    } else {
+        console.log('隐藏主路时钟选择框');
+        primaryClockGroup.style.display = 'none';
+    }
+};
+
 // DOM加载完成后初始化
 document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM加载完成，开始初始化应用...');
     initializeApp();
 });
 
@@ -21,15 +40,8 @@ async function initializeApp() {
         // 加载网络接口
         await loadNetworkInterfaces();
         
-        // 加载同步模式
+        // 加载同步模式（这里包含主路时钟显示逻辑）
         await loadSyncMode();
-        
-        // 根据当前同步模式控制PTP状态项的显示/隐藏
-        const syncModeResponse = await fetch('/api/clock-sync-mode');
-        const syncModeData = await syncModeResponse.json();
-        if (syncModeData.success) {
-            togglePtpStatusVisibility(syncModeData.mode);
-        }
         
         // 加载PTP配置
         await loadPtpConfig();
@@ -45,6 +57,53 @@ async function initializeApp() {
         // 开始状态更新
         startStatusUpdates();
         
+        // 最后再次检查和设置主路时钟显示状态
+        setTimeout(async () => {
+            console.log('=== 最终检查开始 ===');
+            try {
+                const response = await fetch('/api/clock-sync-mode');
+                const data = await response.json();
+                console.log('最终检查 - API响应:', data);
+                
+                if (data.success) {
+                    console.log('最终检查 - 同步模式:', data.mode);
+                    
+                    // 检查DOM元素
+                    const primaryClockGroup = document.getElementById('primaryClockGroup');
+                    const syncModeSelect = document.getElementById('syncMode');
+                    
+                    console.log('最终检查 - primaryClockGroup存在:', !!primaryClockGroup);
+                    console.log('最终检查 - syncModeSelect存在:', !!syncModeSelect);
+                    
+                    if (primaryClockGroup) {
+                        console.log('最终检查 - 当前display样式:', primaryClockGroup.style.display);
+                        
+                        if (data.mode === 'PTP') {
+                            primaryClockGroup.style.display = 'block';
+                            console.log('最终检查 - 强制显示主路时钟选择框');
+                            console.log('最终检查 - 设置后display样式:', primaryClockGroup.style.display);
+                        } else {
+                            primaryClockGroup.style.display = 'none';
+                            console.log('最终检查 - 隐藏主路时钟选择框');
+                        }
+                        
+                        // 确保同步模式选择框的值正确
+                        if (syncModeSelect) {
+                            syncModeSelect.value = data.mode;
+                            console.log('最终检查 - 确保同步模式选择框值为:', data.mode);
+                        }
+                    } else {
+                        console.error('最终检查 - 找不到 primaryClockGroup 元素');
+                    }
+                } else {
+                    console.error('最终检查 - API返回失败:', data);
+                }
+            } catch (error) {
+                console.error('最终检查失败:', error);
+            }
+            console.log('=== 最终检查结束 ===');
+        }, 1000);
+        
         hideLoading();
     } catch (error) {
         console.error('初始化失败:', error);
@@ -57,6 +116,18 @@ async function initializeApp() {
 function bindEventListeners() {
     // 系统同步模式
     document.getElementById('submitSyncMode').addEventListener('click', submitSyncMode);
+    
+    // 为同步方式选择框添加change事件监听器
+    const syncModeSelect = document.getElementById('syncMode');
+    if (syncModeSelect) {
+        syncModeSelect.addEventListener('change', function(e) {
+            console.log('同步方式改变为:', e.target.value);
+            window.togglePrimaryClockVisibility(e.target.value);
+        });
+        console.log('已绑定同步方式change事件');
+    } else {
+        console.error('找不到syncMode元素');
+    }
     
     // PTP时钟1配置
     document.getElementById('submitPtpConfig').addEventListener('click', submitPtpConfig);
@@ -213,34 +284,84 @@ async function loadSyncMode() {
         const data = await response.json();
         
         if (data.success) {
-            document.getElementById('syncMode').value = data.mode;
+            console.log('同步模式加载成功:', data.mode);
+            
+            // 设置下拉框值
+            const syncModeSelect = document.getElementById('syncMode');
+            if (syncModeSelect) {
+                syncModeSelect.value = data.mode;
+                console.log('已设置同步模式选择框值为:', data.mode);
+            } else {
+                console.error('找不到syncMode选择框');
+            }
+            
+            // 立即调用显示控制函数
+            console.log('立即调用主路时钟显示控制, 模式:', data.mode);
+            window.togglePrimaryClockVisibility(data.mode);
+            
+            // 也调用PTP状态显示控制
+            console.log('调用PTP状态显示控制, 模式:', data.mode);
+            togglePtpStatusVisibility(data.mode);
+            
+            // 如果是PTP模式，加载主路时钟配置
+            if (data.mode === 'PTP') {
+                console.log('PTP模式，加载主路时钟配置');
+                await loadPrimaryClockConfig();
+            }
         } else {
             showNotification('加载同步模式失败: ' + data.error, 'error');
         }
     } catch (error) {
+        console.error('加载同步模式失败:', error);
         showNotification('加载同步模式失败: ' + error.message, 'error');
+    }
+}
+
+// 加载主路时钟配置
+async function loadPrimaryClockConfig() {
+    try {
+        const response = await fetch('/api/primary-clock');
+        const data = await response.json();
+        
+        if (data.success) {
+            document.getElementById('primaryClock').value = data.primary_clock || 'ptp1';
+        }
+    } catch (error) {
+        console.error('加载主路时钟配置失败:', error);
+        // 如果获取失败，设置默认值
+        document.getElementById('primaryClock').value = 'ptp1';
     }
 }
 
 // 提交系统同步模式
 async function submitSyncMode() {
     const mode = document.getElementById('syncMode').value;
+    const primaryClock = document.getElementById('primaryClock').value;
+    
+
     
     try {
+        // 构建请求体，只有在PTP模式下才包含主路时钟
+        const requestBody = { mode: mode };
+        if (mode === 'PTP') {
+            requestBody.primary_clock = primaryClock;
+        }
+        
         const response = await fetch('/api/clock-sync-mode', {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ mode: mode })
+            body: JSON.stringify(requestBody)
         });
         
         const data = await response.json();
         
         if (data.success) {
             showNotification('同步模式设置成功', 'success');
-            // 根据新的同步模式控制PTP状态项的显示/隐藏
+            // 根据新的同步模式控制PTP状态项和主路时钟选择的显示/隐藏
             togglePtpStatusVisibility(mode);
+            window.togglePrimaryClockVisibility(mode);
             updateSystemStatus();
         } else {
             showNotification('同步模式设置失败: ' + data.error, 'error');
@@ -248,6 +369,29 @@ async function submitSyncMode() {
     } catch (error) {
         showNotification('同步模式设置失败: ' + error.message, 'error');
     }
+}
+
+// 注意：togglePrimaryClockVisibility函数已移到文件开头定义
+
+// 修改现有的切换PTP状态显示函数，同时控制主路时钟显示
+function togglePtpStatusVisibility(mode) {
+    const ptpSections = document.querySelectorAll('.config-section');
+    const systemStatusItems = document.querySelectorAll('.status-item');
+    
+    // 隐藏所有PTP相关的状态项
+    systemStatusItems.forEach(item => {
+        const label = item.querySelector('.status-label').textContent;
+        if (label.includes('GMID') || label.includes('链路延时') || label.includes('时间偏差')) {
+            if (mode === 'PTP') {
+                item.style.display = ''; // 使用空字符串恢复CSS默认样式
+            } else {
+                item.style.display = 'none';
+            }
+        }
+    });
+    
+    // 控制主路时钟选择的显示
+    window.togglePrimaryClockVisibility(mode);
 }
 
 // 加载PTP时钟1配置
@@ -713,28 +857,6 @@ function startStatusUpdates() {
     }, 1000);
 }
 
-// 根据同步模式控制PTP状态项的显示/隐藏
-function togglePtpStatusVisibility(syncMode) {
-    const ptpStatusItems = [
-        'lockStatus',
-        'gmIdentity', 
-        'meanPathDelay',
-        'offsetFromMaster'
-    ];
-    
-    const shouldShow = syncMode === 'PTP';
-    
-    ptpStatusItems.forEach(itemId => {
-        const element = document.getElementById(itemId);
-        if (element) {
-            const statusItem = element.closest('.status-item');
-            if (statusItem) {
-                statusItem.style.display = shouldShow ? 'flex' : 'none';
-            }
-        }
-    });
-}
-
 // 获取PTP时钟1的当前配置
 async function getPtp1Config() {
     try {
@@ -837,60 +959,113 @@ async function updateSystemStatus() {
             const clockSourceElement = document.getElementById('currentClockSource');
             if (clockSourceElement) {
                 if (mode === 'PTP') {
-                    // PTP模式：获取实际的时钟源信息
-                    const clockSourceResponse = await fetch('/api/clock-source-state');
-                    const clockSourceData = await clockSourceResponse.json();
+                    // PTP模式：使用新的系统时钟状态API
+                    const systemClockResponse = await fetch('/api/system-clock-status');
+                    const systemClockData = await systemClockResponse.json();
                     
-                    if (clockSourceData.current_source) {
-                        clockSourceElement.textContent = clockSourceData.current_source;
-                    }
-                    
-                    // 根据时钟源状态设置锁定状态
-                    const lockStatusElement = document.getElementById('lockStatus');
-                    if (lockStatusElement) {
-                        if (clockSourceData.status === 'normal' && clockSourceData.current_source && clockSourceData.current_source !== 'noClockAvailable') {
-                            // phc2sys正在使用PTP时钟源，显示已锁定
-                            lockStatusElement.textContent = '已锁定';
-                            lockStatusElement.className = 'status-value status-locked';
-                        } else if (clockSourceData.status === 'failed' || clockSourceData.status === 'timeout' || clockSourceData.current_source === 'noClockAvailable') {
-                            // phc2sys无法找到PTP时钟源，自动转入内同步
-                            lockStatusElement.textContent = '未锁定（自动转入内同步）';
-                            lockStatusElement.className = 'status-value status-unlocked';
+                    if (systemClockData.success) {
+                        // 检查是否是PTP无效状态
+                        if (systemClockData.status === 'ptp_invalid_internal') {
+                            // PTP无效，自动转为内同步
+                            clockSourceElement.textContent = '内部';
+                            
+                            const lockStatusElement = document.getElementById('lockStatus');
+                            if (lockStatusElement) {
+                                lockStatusElement.textContent = 'PTP无效，自动转为内同步';
+                                lockStatusElement.className = 'status-value status-internal';
+                            }
+                            
+                            // 清空PTP相关数据
+                            const gmIdentityElement = document.getElementById('gmIdentity');
+                            const offsetElement = document.getElementById('offsetFromMaster');
+                            if (gmIdentityElement) gmIdentityElement.textContent = '-';
+                            if (offsetElement) offsetElement.textContent = '-';
                         } else {
-                            // 其他情况
-                            lockStatusElement.textContent = '未知';
+                            // 正常PTP状态
+                            // 根据主路时钟显示对应的PTP时钟名称
+                            const primaryClock = systemClockData.primary_clock;
+                            let clockSourceText = 'PTP同步时钟';
+                            if (primaryClock === 'ptp1') {
+                                clockSourceText = 'PTP时钟1';
+                            } else if (primaryClock === 'ptp2') {
+                                clockSourceText = 'PTP时钟2';
+                            }
+                            clockSourceElement.textContent = clockSourceText;
+                            
+                            // 设置锁定状态
+                            const lockStatusElement = document.getElementById('lockStatus');
+                            if (lockStatusElement) {
+                                if (systemClockData.locked) {
+                                    lockStatusElement.textContent = '已锁定';
+                                    lockStatusElement.className = 'status-value status-locked';
+                                } else {
+                                    let statusText = '未锁定';
+                                    if (systemClockData.status === 'no_logs') {
+                                        statusText = '未锁定（无日志）';
+                                    } else if (systemClockData.status === 'no_sync_data') {
+                                        statusText = '未锁定（无同步数据）';
+                                    } else if (systemClockData.status === 'service_error') {
+                                        statusText = '未锁定（服务错误）';
+                                    }
+                                    lockStatusElement.textContent = statusText;
+                                    lockStatusElement.className = 'status-value status-unlocked';
+                                }
+                            }
+                            
+                            // 更新时间偏差为从日志获取的offset
+                            const offsetElement = document.getElementById('offsetFromMaster');
+                            if (offsetElement) {
+                                if (systemClockData.offset !== null && systemClockData.offset !== undefined) {
+                                    offsetElement.textContent = systemClockData.offset + ' ns';
+                                } else {
+                                    offsetElement.textContent = 'Unknown';
+                                }
+                            }
+                        }
+
+                    } else {
+                        // API调用失败的情况，尝试从primary_clock字段获取信息
+                        const primaryClock = systemClockData.primary_clock;
+                        let clockSourceText = 'PTP同步时钟';
+                        if (primaryClock === 'ptp1') {
+                            clockSourceText = 'PTP时钟1';
+                        } else if (primaryClock === 'ptp2') {
+                            clockSourceText = 'PTP时钟2';
+                        }
+                        clockSourceElement.textContent = clockSourceText;
+                        
+                        const lockStatusElement = document.getElementById('lockStatus');
+                        if (lockStatusElement) {
+                            lockStatusElement.textContent = '状态未知';
                             lockStatusElement.className = 'status-value';
                         }
-                    }
-                    
-                    // 根据当前时钟源确定对应的PTP时钟
-                    let targetUdsPath = '/var/run/ptp4l'; // 默认PTP时钟1
-                    if (clockSourceData.current_source) {
-                        // 获取时钟源映射关系
-                        const clockSourceMapping = await getClockSourceMapping();
                         
-                        // 根据当前时钟源确定对应的PTP时钟
-                        if (clockSourceMapping[clockSourceData.current_source]) {
-                            targetUdsPath = clockSourceMapping[clockSourceData.current_source];
-                        } else {
-                            // 如果没有找到映射，使用默认值
-                            console.warn(`未找到时钟源 ${clockSourceData.current_source} 的映射，使用默认PTP时钟1`);
-                        }
+                        const offsetElement = document.getElementById('offsetFromMaster');
+                        if (offsetElement) offsetElement.textContent = 'Unknown';
                     }
                     
-                    // 获取对应PTP时钟的状态信息并更新系统同步状态区域
+                    // 仍然需要获取GMID信息，从主时钟源获取
                     try {
-                        // 根据当前时钟源确定对应的PTP时钟配置
+                        // 获取主路时钟配置以确定使用哪个UDS路径
+                        const primaryClockResponse = await fetch('/api/primary-clock');
+                        const primaryClockData = await primaryClockResponse.json();
+                        
+                        let targetUdsPath = '/var/run/ptp4l'; // 默认PTP时钟1
+                        if (primaryClockData.success && primaryClockData.primary_clock === 'ptp2') {
+                            targetUdsPath = '/var/run/ptp4l1';
+                        }
+                        
+                        // 获取对应PTP时钟的配置
                         let targetConfig = null;
                         if (targetUdsPath === '/var/run/ptp4l') {
                             targetConfig = await getPtp1Config();
-                        } else if (targetUdsPath === '/var/run/ptp4l1') {
+                        } else {
                             targetConfig = await getPtp2Config();
                         }
                         
-                        const domain = targetConfig ? parseInt(targetConfig.domainNumber) : 127; // 默认使用127
+                        const domain = targetConfig ? parseInt(targetConfig.domainNumber) : 127;
                         
-                        // 获取时间状态（包含GM Identity）
+                        // 获取GM Identity
                         const timeStatusResponse = await fetch(`/api/ptp-timestatus?uds_path=${targetUdsPath}&domain=${domain}`);
                         const timeStatusData = await timeStatusResponse.json();
                         
@@ -900,24 +1075,8 @@ async function updateSystemStatus() {
                                 gmIdentityElement.textContent = timeStatusData.gmIdentity || 'Unknown';
                             }
                         }
-                        
-                        // 获取当前时间数据
-                        const timeResponse = await fetch(`/api/ptp-currenttimedata?uds_path=${targetUdsPath}&domain=${domain}`);
-                        const timeData = await timeResponse.json();
-                        
-                        if (timeData.success) {
-                            const offsetElement = document.getElementById('offsetFromMaster');
-                            const delayElement = document.getElementById('meanPathDelay');
-                            
-                            if (offsetElement) {
-                                offsetElement.textContent = (timeData.offsetFromMaster !== undefined && timeData.offsetFromMaster !== null) ? timeData.offsetFromMaster : 'Unknown';
-                            }
-                            if (delayElement) {
-                                delayElement.textContent = (timeData.meanPathDelay !== undefined && timeData.meanPathDelay !== null) ? timeData.meanPathDelay : 'Unknown';
-                            }
-                        }
                     } catch (error) {
-                        console.error('获取PTP状态信息失败:', error);
+                        console.error('获取GMID信息失败:', error);
                     }
                 } else {
                     // BB或内部模式：显示本地内部时钟
@@ -927,7 +1086,6 @@ async function updateSystemStatus() {
                     const gmIdentityElement = document.getElementById('gmIdentity');
                     const lockStatusElement = document.getElementById('lockStatus');
                     const offsetElement = document.getElementById('offsetFromMaster');
-                    const delayElement = document.getElementById('meanPathDelay');
                     
                     if (gmIdentityElement) gmIdentityElement.textContent = '-';
                     if (lockStatusElement) {
@@ -935,7 +1093,6 @@ async function updateSystemStatus() {
                         lockStatusElement.className = 'status-value';
                     }
                     if (offsetElement) offsetElement.textContent = '-';
-                    if (delayElement) delayElement.textContent = '-';
                 }
             }
         }

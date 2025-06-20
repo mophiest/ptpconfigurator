@@ -151,6 +151,129 @@ class ClockSourceState:
 # 创建全局状态实例
 clock_source_state = ClockSourceState()
 
+# 全局变量存储当前主路时钟配置
+current_primary_clock = "ptp1"  # 默认使用PTP时钟1
+current_backup_clock = "ptp2"   # 备路时钟
+
+def get_phc2sys_uds_path(clock_type: str) -> str:
+    """根据时钟类型获取对应的UDS路径"""
+    if clock_type == "ptp1":
+        return "/var/run/ptp4l"
+    elif clock_type == "ptp2":
+        return "/var/run/ptp4l1"
+    else:
+        return "/var/run/ptp4l"  # 默认
+
+def get_backup_clock(primary_clock: str) -> str:
+    """根据主路时钟获取备路时钟"""
+    return "ptp2" if primary_clock == "ptp1" else "ptp1"
+
+def update_phc2sys_service_config(primary_clock: str) -> bool:
+    """
+    更新phc2sys.service配置，使用单一时钟源
+    Args:
+        primary_clock: 主路时钟类型 ("ptp1" 或 "ptp2")
+    Returns:
+        bool: 更新是否成功
+    """
+    try:
+        service_path = "/etc/systemd/system/phc2sys.service"
+        if not os.path.exists(service_path):
+            logger.error(f"phc2sys.service文件不存在: {service_path}")
+            return False
+            
+        # 获取对应的UDS路径
+        uds_path = get_phc2sys_uds_path(primary_clock)
+        logger.info(f"更新phc2sys.service配置，主路时钟: {primary_clock}, UDS路径: {uds_path}")
+        
+        # 读取当前配置文件
+        with open(service_path, 'r') as f:
+            lines = f.readlines()
+        
+        new_lines = []
+        updated = False
+        
+        for line in lines:
+            if line.strip().startswith("ExecStart="):
+                # 构建新的ExecStart行，只使用一个时钟源
+                new_exec_start = f"ExecStart=phc2sys -z {uds_path} -n 127 -r -m -a\n"
+                new_lines.append(new_exec_start)
+                updated = True
+                logger.info(f"更新ExecStart为: {new_exec_start.strip()}")
+            else:
+                new_lines.append(line)
+        
+        if not updated:
+            logger.error("未找到ExecStart行")
+            return False
+            
+        # 写回配置文件
+        with open(service_path, 'w') as f:
+            f.writelines(new_lines)
+            
+        logger.info("phc2sys.service配置更新成功")
+        return True
+        
+    except Exception as e:
+        logger.error(f"更新phc2sys.service配置失败: {str(e)}")
+        return False
+
+async def switch_to_backup_clock():
+    """
+    切换到备路时钟
+    """
+    global current_primary_clock, current_backup_clock
+    try:
+        old_primary = current_primary_clock
+        current_primary_clock = current_backup_clock
+        current_backup_clock = old_primary
+        
+        logger.info(f"检测到主路时钟异常，切换到备路时钟: {current_primary_clock}")
+        
+        # 更新phc2sys服务配置
+        if update_phc2sys_service_config(current_primary_clock):
+            # 重启phc2sys服务
+            if check_phc2sys_service_status():
+                logger.info("重启phc2sys服务以切换时钟源...")
+                subprocess.run(["systemctl", "daemon-reload"], check=True)
+                subprocess.run(["systemctl", "restart", "phc2sys.service"], check=True)
+                logger.info("phc2sys服务重启成功，已切换到备路时钟")
+                return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"切换到备路时钟失败: {str(e)}")
+        return False
+
+async def switch_back_to_primary():
+    """
+    恢复到原主路时钟
+    """
+    global current_primary_clock, current_backup_clock
+    try:
+        # 获取用户原始设定的主路时钟（这里简化处理，实际可以从配置文件读取）
+        original_primary = current_backup_clock  # 当前的备路就是原来的主路
+        
+        logger.info(f"检测到原主路时钟恢复，切换回原主路时钟: {original_primary}")
+        
+        current_primary_clock = original_primary
+        current_backup_clock = "ptp2" if original_primary == "ptp1" else "ptp1"
+        
+        # 更新phc2sys服务配置
+        if update_phc2sys_service_config(current_primary_clock):
+            # 重启phc2sys服务
+            if check_phc2sys_service_status():
+                logger.info("重启phc2sys服务以恢复原主路时钟...")
+                subprocess.run(["systemctl", "daemon-reload"], check=True)
+                subprocess.run(["systemctl", "restart", "phc2sys.service"], check=True)
+                logger.info("phc2sys服务重启成功，已恢复到原主路时钟")
+                return True
+        
+        return False
+    except Exception as e:
+        logger.error(f"恢复到原主路时钟失败: {str(e)}")
+        return False
+
 def check_phc2sys_service_status() -> bool:
     """检查phc2sys服务是否正在运行"""
     try:
@@ -344,11 +467,13 @@ class ClockSyncMode(BaseModel):
     主机锁相方式请求模型
     """
     mode: str = Field(..., description="锁相方式", example="PTP", pattern="^(internal|BB|PTP)$")
-    
+    primary_clock: Optional[str] = Field(None, description="主路时钟选择", example="ptp1", pattern="^(ptp1|ptp2)$")
+
     class Config:
         json_schema_extra = {
             "example": {
-                "mode": "PTP"
+                "mode": "PTP",
+                "primary_clock": "ptp1"
             }
         }
 
@@ -652,7 +777,7 @@ async def update_config(update: Union[ConfigUpdate, PtpConfigUpdate], config_pat
                             if result.returncode == 0 and result.stdout.strip() == 'active':
                                 logger.info("phc2sys.service正在运行，准备重启")
                                 restart_result = subprocess.run(['systemctl', 'restart', 'phc2sys.service'], 
-                                                              capture_output=True, text=True, timeout=10)
+                                                              capture_output=True, text=True, timeout=30)
                                 if restart_result.returncode == 0:
                                     logger.info("phc2sys.service重启成功")
                                 else:
@@ -874,7 +999,7 @@ async def systemd_reload():
         dict: 操作结果
     """
     try:
-        subprocess.run(["sudo", "systemctl", "daemon-reload"], check=True)
+        subprocess.run(["systemctl", "daemon-reload"], check=True)
         return {"success": True, "message": "systemd 配置已重载"}
     except Exception as e:
         logger.error(f"systemd reload 失败: {str(e)}")
@@ -889,7 +1014,7 @@ async def systemd_enable_ptp4l():
         dict: 操作结果
     """
     try:
-        subprocess.run(["sudo", "systemctl", "enable", "ptp4l.service"], check=True)
+        subprocess.run(["systemctl", "enable", "ptp4l.service"], check=True)
         return {"success": True, "message": "ptp4l.service 已设置为开机自启"}
     except Exception as e:
         logger.error(f"enable ptp4l 失败: {str(e)}")
@@ -910,7 +1035,7 @@ async def systemd_start_service(action: ServiceAction):
         logger.info(f"启动服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
             return {"success": False, "error": "服务名称必须以.service结尾"}
-        subprocess.run(["sudo", "systemctl", "start", action.service_name], check=True)
+        subprocess.run(["systemctl", "start", action.service_name], check=True)
         logger.info(f"服务 {action.service_name} 启动成功")
         return {"success": True, "message": f"{action.service_name} 已启动", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
@@ -935,7 +1060,7 @@ async def systemd_stop_service(action: ServiceAction):
         logger.info(f"停止服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
             return {"success": False, "error": "服务名称必须以.service结尾"}
-        subprocess.run(["sudo", "systemctl", "stop", action.service_name], check=True)
+        subprocess.run(["systemctl", "stop", action.service_name], check=True)
         logger.info(f"服务 {action.service_name} 停止成功")
         return {"success": True, "message": f"{action.service_name} 已停止", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
@@ -960,7 +1085,7 @@ async def systemd_restart_service(action: ServiceAction):
         logger.info(f"重启服务: {action.service_name}")
         if not action.service_name.endswith('.service'):
             return {"success": False, "error": "服务名称必须以.service结尾"}
-        subprocess.run(["sudo", "systemctl", "restart", action.service_name], check=True)
+        subprocess.run(["systemctl", "restart", action.service_name], check=True)
         logger.info(f"服务 {action.service_name} 重启成功")
         return {"success": True, "message": f"{action.service_name} 已重启", "service_name": action.service_name}
     except subprocess.CalledProcessError as e:
@@ -989,7 +1114,7 @@ async def systemd_logs(
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
         result = subprocess.run([
-            "sudo", "journalctl", "-u", service, f"-n{lines}", "--no-pager"
+            "journalctl", "-u", service, f"-n{lines}", "--no-pager"
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8")
         return {"service": service, "logs": result.stdout}
     except Exception as e:
@@ -1011,7 +1136,7 @@ async def systemd_status(service: str):
         raise HTTPException(status_code=400, detail="不支持的服务名")
     try:
         result = subprocess.run([
-            "sudo", "systemctl", "status", service, "--no-pager"
+            "systemctl", "status", service, "--no-pager"
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8")
         return {"service": service, "status": result.stdout}
     except Exception as e:
@@ -1422,14 +1547,15 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
     设置主机锁相方式
     
     Args:
-        sync_mode: 包含要设置的锁相方式 ("internal", "BB", "PTP")
+        sync_mode: 包含要设置的锁相方式 ("internal", "BB", "PTP") 和可选的主路时钟
     
     Returns:
         dict: 操作结果和当前锁相方式
     """
     try:
         mode = sync_mode.mode
-        logger.info(f"设置锁相方式: {mode}")
+        primary_clock = sync_mode.primary_clock
+        logger.info(f"设置锁相方式: {mode}, 主路时钟: {primary_clock}")
         
         # 检查当前phc2sys服务状态
         phc2sys_running = check_phc2sys_service_status()
@@ -1459,6 +1585,20 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
                 logger.info("phc2sys服务未运行，无需操作")
         
         elif mode == "PTP":
+            # 处理主路时钟设置
+            global current_primary_clock, current_backup_clock
+            if primary_clock and primary_clock in ["ptp1", "ptp2"]:
+                current_primary_clock = primary_clock
+                current_backup_clock = get_backup_clock(primary_clock)
+                logger.info(f"设置主路时钟为: {current_primary_clock}, 备路时钟为: {current_backup_clock}")
+                
+                # 更新phc2sys服务配置
+                if not update_phc2sys_service_config(current_primary_clock):
+                    raise HTTPException(status_code=500, detail="更新phc2sys服务配置失败")
+                
+                # 重新加载systemd配置
+                subprocess.run(["systemctl", "daemon-reload"], check=True)
+            
             # 对于PTP模式，需要确保phc2sys服务运行
             if not phc2sys_running:
                 logger.info("启动phc2sys服务...")
@@ -1478,7 +1618,13 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
                 
                 logger.info("phc2sys服务已启动")
             else:
-                logger.info("phc2sys服务已在运行")
+                # 如果服务已在运行且配置有变化，需要重启服务
+                if primary_clock and primary_clock in ["ptp1", "ptp2"]:
+                    logger.info("重启phc2sys服务以应用新的主路时钟配置...")
+                    subprocess.run(["systemctl", "restart", "phc2sys.service"], check=True)
+                    logger.info("phc2sys服务重启成功")
+                else:
+                    logger.info("phc2sys服务已在运行")
         
         # 获取操作后的当前状态
         current_mode = get_current_clock_sync_mode()
@@ -1491,7 +1637,9 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
             "message": f"锁相方式已设置为: {mode}",
             "requested_mode": mode,
             "current_mode": current_mode,
-            "phc2sys_running": current_phc2sys_running
+            "phc2sys_running": current_phc2sys_running,
+            "primary_clock": current_primary_clock if mode == "PTP" else None,
+            "backup_clock": current_backup_clock if mode == "PTP" else None
         }
         if current_mode == "PTP":
             last_clock_info = await get_last_clock_source_from_logs()
@@ -1509,8 +1657,11 @@ async def update_clock_sync_mode(sync_mode: ClockSyncMode):
         raise HTTPException(status_code=500, detail=f"设置锁相方式失败: {str(e)}")
 
 async def monitor_phc2sys_logs():
-    """监控phc2sys日志，检测时钟源变化"""
+    """监控phc2sys日志，检测时钟源变化，并实现自动切换功能"""
     logger.info("开始监控phc2sys日志...")
+    last_backup_switch_time = None
+    backup_switch_timeout = 60  # 60秒内不重复切换
+    
     while True:
         try:
             # 使用journalctl命令获取phc2sys的日志
@@ -1541,8 +1692,39 @@ async def monitor_phc2sys_logs():
                     is_failed = "for synchronization" in line_str
                     logger.info(f"检测到时钟源{'异常' if is_failed else '变化'}: {source}")
                     await clock_source_state.update(source, is_failed)
+                    
+                    # 检测是否需要自动切换到备路时钟
+                    if is_failed:
+                        # 检查当前使用的时钟源是否是主路时钟
+                        global current_primary_clock
+                        primary_uds = get_phc2sys_uds_path(current_primary_clock)
+                        
+                        # 从网络接口映射到UDS路径来判断当前使用的是哪个时钟
+                        current_clock_type = None
+                        if source.startswith("ens") or source.startswith("eth"):
+                            # 这是网络接口名，需要映射到时钟类型
+                            mapping = await get_interface_to_clock_mapping()
+                            if source in mapping:
+                                current_uds = mapping[source]
+                                if current_uds == "/var/run/ptp4l":
+                                    current_clock_type = "ptp1"
+                                elif current_uds == "/var/run/ptp4l1":
+                                    current_clock_type = "ptp2"
+                        
+                        # 如果当前时钟是主路时钟且异常，需要切换到备路时钟
+                        if current_clock_type == current_primary_clock:
+                            current_time = datetime.now()
+                            if (last_backup_switch_time is None or 
+                                (current_time - last_backup_switch_time).total_seconds() > backup_switch_timeout):
+                                
+                                logger.warning(f"主路时钟 {current_primary_clock} 异常，准备切换到备路时钟")
+                                if await switch_to_backup_clock():
+                                    last_backup_switch_time = current_time
+                                    logger.info("已成功切换到备路时钟")
+                                else:
+                                    logger.error("切换到备路时钟失败")
 
-                # 检测同步状态更新
+                # 检测同步状态更新（正常工作）
                 elif "CLOCK_REALTIME phc offset" in line_str:
                     # 重置超时计时器
                     async with clock_source_state._lock:
@@ -1551,9 +1733,40 @@ async def monitor_phc2sys_logs():
                             clock_source_state.is_failed = False
                             logger.info("时钟源恢复正常")
 
+                # 检测时钟源无法使用的情况
+                elif "no clock available" in line_str.lower() or "failed to select" in line_str.lower():
+                    logger.warning("检测到时钟源不可用，尝试切换到备路时钟")
+                    await switch_to_backup_clock()
+
         except Exception as e:
             logger.error(f"监控phc2sys日志时发生错误: {str(e)}")
             await asyncio.sleep(5)  # 发生错误时等待5秒后重试
+
+async def get_interface_to_clock_mapping():
+    """
+    获取网络接口到时钟的映射关系
+    返回: dict {interface_name: uds_path}
+    """
+    try:
+        mapping = {}
+        
+        # 获取PTP时钟1的接口
+        ptp1_response = await get_service_interfaces("ptp4l.service")
+        if ptp1_response.get("success") and ptp1_response.get("interfaces"):
+            for iface in ptp1_response["interfaces"]:
+                mapping[iface] = "/var/run/ptp4l"
+        
+        # 获取PTP时钟2的接口
+        ptp2_response = await get_service_interfaces("ptp4l1.service")
+        if ptp2_response.get("success") and ptp2_response.get("interfaces"):
+            for iface in ptp2_response["interfaces"]:
+                mapping[iface] = "/var/run/ptp4l1"
+        
+        return mapping
+        
+    except Exception as e:
+        logger.error(f"获取接口映射失败: {str(e)}")
+        return {}
 
 async def get_last_clock_source_from_logs() -> Optional[tuple[str, bool]]:
     """
@@ -1686,6 +1899,313 @@ def update_phc2sys_domain(new_domain: int, config_file: str) -> bool:
     except Exception as e:
         logger.error(f"更新phc2sys.service配置失败: {str(e)}")
         return False
+
+@app.get("/api/primary-clock")
+async def get_primary_clock():
+    """
+    获取当前主路时钟配置
+    
+    Returns:
+        dict: 包含当前主路时钟信息
+    """
+    try:
+        global current_primary_clock, current_backup_clock
+        return {
+            "success": True,
+            "primary_clock": current_primary_clock,
+            "backup_clock": current_backup_clock
+        }
+    except Exception as e:
+        logger.error(f"获取主路时钟配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail="获取主路时钟配置失败")
+
+@app.put("/api/primary-clock")
+async def update_primary_clock(update: dict):
+    """
+    更新主路时钟配置
+    """
+    global current_primary_clock, current_backup_clock
+    
+    try:
+        primary_clock = update.get("primary_clock")
+        if not primary_clock or primary_clock not in ["ptp1", "ptp2"]:
+            raise HTTPException(status_code=400, detail="primary_clock必须是ptp1或ptp2")
+        
+        # 更新全局变量
+        old_primary = current_primary_clock
+        current_primary_clock = primary_clock
+        current_backup_clock = get_backup_clock(primary_clock)
+        
+        logger.info(f"主路时钟配置更新: {old_primary} -> {current_primary_clock}, 备路时钟: {current_backup_clock}")
+        
+        # 更新phc2sys服务配置
+        if not update_phc2sys_service_config(current_primary_clock):
+            # 如果更新失败，恢复原配置
+            current_primary_clock = old_primary
+            current_backup_clock = get_backup_clock(old_primary)
+            raise HTTPException(status_code=500, detail="更新phc2sys服务配置失败")
+        
+        # 重启phc2sys服务使配置生效
+        if check_phc2sys_service_status():
+            try:
+                subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=10)
+                subprocess.run(["systemctl", "restart", "phc2sys.service"], check=True, timeout=30)
+                logger.info("phc2sys服务重启成功")
+            except subprocess.TimeoutExpired:
+                raise HTTPException(status_code=500, detail="phc2sys服务重启超时")
+            except subprocess.CalledProcessError as e:
+                raise HTTPException(status_code=500, detail=f"phc2sys服务重启失败: {e}")
+        
+        return {
+            "success": True,
+            "primary_clock": current_primary_clock,
+            "backup_clock": current_backup_clock,
+            "message": "主路时钟配置更新成功"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新主路时钟配置失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"更新主路时钟配置失败: {str(e)}")
+
+async def get_ptp_config_domain(config_file):
+    """获取PTP配置文件中的domain值"""
+    try:
+        response = await get_ptp_config(config_file=config_file)
+        if response.get("success") and response.get("config"):
+            return int(response["config"].get("domainNumber", 127))
+        return 127  # 默认值
+    except:
+        return 127  # 默认值
+
+async def check_ptp_clocks_locked_status():
+    """
+    检查PTP时钟1和PTP时钟2的锁定状态
+    返回: (ptp1_locked, ptp2_locked)
+    """
+    try:
+        # 获取PTP时钟1的实际domain值
+        ptp1_domain = await get_ptp_config_domain("/etc/linuxptp/ptp4l.conf")
+        
+        # 获取PTP时钟2的实际domain值
+        ptp2_domain = await get_ptp_config_domain("/etc/linuxptp/ptp4l1.conf")
+        
+        logger.info(f"检查PTP锁定状态: PTP1 domain={ptp1_domain}, PTP2 domain={ptp2_domain}")
+        
+        # 检查PTP时钟1锁定状态
+        ptp1_locked = False
+        try:
+            ptp1_response = await get_ptp_timestatus(ptp1_domain, "/var/run/ptp4l")
+            if ptp1_response.get("success") and ptp1_response.get("gmPresent") == "true":
+                ptp1_locked = True
+                logger.info(f"PTP时钟1 (domain {ptp1_domain}) 已锁定")
+            else:
+                logger.info(f"PTP时钟1 (domain {ptp1_domain}) 未锁定")
+        except Exception as e:
+            logger.debug(f"检查PTP时钟1状态异常: {str(e)}")
+        
+        # 检查PTP时钟2锁定状态
+        ptp2_locked = False
+        try:
+            ptp2_response = await get_ptp_timestatus(ptp2_domain, "/var/run/ptp4l1")
+            if ptp2_response.get("success") and ptp2_response.get("gmPresent") == "true":
+                ptp2_locked = True
+                logger.info(f"PTP时钟2 (domain {ptp2_domain}) 已锁定")
+            else:
+                logger.info(f"PTP时钟2 (domain {ptp2_domain}) 未锁定")
+        except Exception as e:
+            logger.debug(f"检查PTP时钟2状态异常: {str(e)}")
+        
+        return ptp1_locked, ptp2_locked
+        
+    except Exception as e:
+        logger.error(f"检查PTP时钟锁定状态失败: {str(e)}")
+        return False, False
+
+@app.get("/api/system-clock-status")
+async def get_system_clock_status():
+    """
+    获取系统时钟锁定状态和offset信息
+    通过解析phc2sys服务日志来判断状态
+    """
+    try:
+        global current_primary_clock
+        
+        # 首先检查PTP时钟的锁定状态
+        ptp1_locked, ptp2_locked = await check_ptp_clocks_locked_status()
+        
+        # 检查是否需要自动切换
+        if current_primary_clock == "ptp1" and not ptp1_locked and ptp2_locked:
+            logger.warning("主路时钟PTP1未锁定，但备路时钟PTP2已锁定，自动切换到PTP2")
+            if await switch_to_backup_clock():
+                logger.info("已自动切换到备路时钟PTP2")
+        elif current_primary_clock == "ptp2" and not ptp2_locked and ptp1_locked:
+            logger.warning("主路时钟PTP2未锁定，但备路时钟PTP1已锁定，自动切换到PTP1")
+            if await switch_to_backup_clock():
+                logger.info("已自动切换到备路时钟PTP1")
+        
+        # 如果两个PTP时钟都未锁定，则返回PTP无效状态
+        if not ptp1_locked and not ptp2_locked:
+            return {
+                "success": True,
+                "locked": False,
+                "status": "ptp_invalid_internal",
+                "offset": None,
+                "frequency": None,
+                "delay": None,
+                "primary_clock": current_primary_clock,
+                "ptp1_locked": ptp1_locked,
+                "ptp2_locked": ptp2_locked,
+                "message": "PTP无效，自动转为内同步"
+            }
+        
+        # 获取phc2sys服务的最近日志
+        result = subprocess.run(
+            ["journalctl", "-u", "phc2sys.service", "--no-pager", "-n", "20", "--output=short"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        if result.returncode != 0:
+            return {
+                "success": False,
+                "locked": False,
+                "status": "service_error",
+                "offset": None,
+                "frequency": None,
+                "delay": None,
+                "primary_clock": current_primary_clock,
+                "ptp1_locked": ptp1_locked,
+                "ptp2_locked": ptp2_locked,
+                "error": "无法获取phc2sys服务日志"
+            }
+        
+        logs = result.stdout.strip()
+        if not logs:
+            return {
+                "success": False,
+                "locked": False,
+                "status": "no_logs",
+                "offset": None,
+                "frequency": None,
+                "delay": None,
+                "primary_clock": current_primary_clock,
+                "ptp1_locked": ptp1_locked,
+                "ptp2_locked": ptp2_locked,
+                "error": "phc2sys服务无日志输出"
+            }
+        
+        # 解析日志中的offset信息
+        # 样例: Jun 20 20:28:27 bogon phc2sys[410296]: [283740.250] CLOCK_REALTIME phc offset         0 s2 freq   +5721 delay    561
+        offset_pattern = r'CLOCK_REALTIME phc offset\s+(-?\d+)\s+s2 freq\s+([+-]?\d+)\s+delay\s+(\d+)'
+        
+        lines = logs.split('\n')
+        recent_offsets = []
+        latest_offset = None
+        latest_freq = None
+        latest_delay = None
+        
+        # 分析最近的日志行
+        for line in reversed(lines):
+            match = re.search(offset_pattern, line)
+            if match:
+                offset = int(match.group(1))
+                freq = int(match.group(2))
+                delay = int(match.group(3))
+                
+                recent_offsets.append(offset)
+                if latest_offset is None:
+                    latest_offset = offset
+                    latest_freq = freq
+                    latest_delay = delay
+                
+                # 收集最近5个offset值用于稳定性判断
+                if len(recent_offsets) >= 5:
+                    break
+        
+        if not recent_offsets:
+            return {
+                "success": False,
+                "locked": False,
+                "status": "no_sync_data",
+                "offset": None,
+                "frequency": None,
+                "delay": None,
+                "primary_clock": current_primary_clock,
+                "ptp1_locked": ptp1_locked,
+                "ptp2_locked": ptp2_locked,
+                "error": "日志中未找到同步数据"
+            }
+        
+        # 判断锁定状态：
+        # 1. 至少有3个offset值
+        # 2. offset值在合理范围内（比如-100到+100纳秒）
+        # 3. 最近的日志不超过5秒
+        locked = False
+        status = "unlocked"
+        
+        if len(recent_offsets) >= 3:
+            # 检查offset值是否在合理范围内
+            max_offset = max(abs(o) for o in recent_offsets)
+            if max_offset <= 1000:  # 1000纳秒以内认为是锁定的
+                # 检查最新日志的时间戳
+                for line in reversed(lines):
+                    if 'CLOCK_REALTIME phc offset' in line:
+                        # 简单检查：如果有最新的offset数据，认为是锁定的
+                        locked = True
+                        status = "locked"
+                        break
+        
+        return {
+            "success": True,
+            "locked": locked,
+            "status": status,
+            "offset": latest_offset,
+            "frequency": latest_freq,
+            "delay": latest_delay,
+            "primary_clock": current_primary_clock,  # 添加主路时钟信息
+            "ptp1_locked": ptp1_locked,
+            "ptp2_locked": ptp2_locked,
+            "recent_offsets": recent_offsets[:5],  # 最近5个offset值
+            "max_offset": max(abs(o) for o in recent_offsets) if recent_offsets else 0
+        }
+        
+    except subprocess.TimeoutExpired:
+        # 在超时情况下也需要检查PTP时钟状态
+        ptp1_locked, ptp2_locked = await check_ptp_clocks_locked_status()
+        return {
+            "success": False,
+            "locked": False,
+            "status": "timeout",
+            "offset": None,
+            "frequency": None,
+            "delay": None,
+            "primary_clock": current_primary_clock,
+            "ptp1_locked": ptp1_locked,
+            "ptp2_locked": ptp2_locked,
+            "error": "获取日志超时"
+        }
+    except Exception as e:
+        logger.error(f"获取系统时钟状态失败: {str(e)}")
+        # 在异常情况下也尝试检查PTP时钟状态
+        try:
+            ptp1_locked, ptp2_locked = await check_ptp_clocks_locked_status()
+        except:
+            ptp1_locked, ptp2_locked = False, False
+        return {
+            "success": False,
+            "locked": False,
+            "status": "error",
+            "offset": None,
+            "frequency": None,
+            "delay": None,
+            "primary_clock": current_primary_clock,
+            "ptp1_locked": ptp1_locked,
+            "ptp2_locked": ptp2_locked,
+            "error": str(e)
+        }
 
 if __name__ == "__main__":
     import uvicorn
